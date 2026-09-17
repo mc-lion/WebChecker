@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"webchecker/internal/config"
+	"webchecker/internal/models"
 	"webchecker/internal/store"
 	"webchecker/internal/telegram"
 	webassets "webchecker/web"
@@ -49,6 +50,8 @@ func (s *Server) Handler() http.Handler {
 	protected.HandleFunc("POST /monitors/{id}/toggle", s.toggle)
 	protected.HandleFunc("GET /settings", s.settings)
 	protected.HandleFunc("POST /settings/telegram-test", s.telegramTest)
+	protected.HandleFunc("GET /settings/export", s.exportDump)
+	protected.HandleFunc("POST /settings/import", s.importDump)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
@@ -280,6 +283,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		"Active":             "settings",
 		"TelegramEnabled":    s.cfg.TelegramEnabled,
 		"TelegramConfigured": s.cfg.TelegramConfigured(),
+		"TelegramSlowAlerts": s.cfg.TelegramSlowAlerts,
 		"RetentionDays":      s.cfg.StatsRetentionDays,
 		"CheckerWorkers":     s.cfg.CheckerWorkers,
 	})
@@ -293,6 +297,54 @@ func (s *Server) telegramTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/settings?msg=telegram_ok", http.StatusSeeOther)
+}
+
+const maxImportBytes = 32 << 20
+
+func (s *Server) exportDump(w http.ResponseWriter, r *http.Request) {
+	dump, err := s.store.ExportDump(r.Context())
+	if err != nil {
+		s.serverError(w, "export dump", err)
+		return
+	}
+	filename := fmt.Sprintf("webchecker-%s.json", time.Now().Local().Format("20060102-150405"))
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(dump); err != nil {
+		slog.Error("encode dump", "error", err)
+	}
+}
+
+func (s *Server) importDump(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxImportBytes+1024)
+	if err := r.ParseMultipartForm(maxImportBytes); err != nil {
+		http.Redirect(w, r, "/settings?err="+urlQuery("Не удалось прочитать файл. Максимум 32 МБ."), http.StatusSeeOther)
+		return
+	}
+	file, header, err := r.FormFile("dump")
+	if err != nil {
+		http.Redirect(w, r, "/settings?err="+urlQuery("Выберите JSON-файл для импорта"), http.StatusSeeOther)
+		return
+	}
+	defer file.Close()
+	if header.Size > maxImportBytes {
+		http.Redirect(w, r, "/settings?err="+urlQuery("Файл слишком большой (максимум 32 МБ)"), http.StatusSeeOther)
+		return
+	}
+
+	var dump models.Dump
+	dec := json.NewDecoder(file)
+	if err := dec.Decode(&dump); err != nil {
+		http.Redirect(w, r, "/settings?err="+urlQuery("Файл не является корректным JSON-дампом"), http.StatusSeeOther)
+		return
+	}
+	if err := s.store.ImportDump(r.Context(), dump); err != nil {
+		http.Redirect(w, r, "/settings?err="+urlQuery(err.Error()), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/settings?msg=imported", http.StatusSeeOther)
 }
 
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
@@ -375,26 +427,15 @@ func flashMessage(code string) string {
 		return "Состояние монитора изменено"
 	case "telegram_ok":
 		return "Тестовое сообщение отправлено"
+	case "imported":
+		return "Данные импортированы"
 	default:
 		return ""
 	}
 }
 
 func stateLabel(state string) string {
-	switch state {
-	case "ok":
-		return "OK"
-	case "down":
-		return "Недоступен"
-	case "slow":
-		return "Медленно"
-	case "disabled":
-		return "Выключен"
-	case "pending":
-		return "Ожидание"
-	default:
-		return state
-	}
+	return models.StatusLabel(state)
 }
 
 func fmtTime(t *time.Time) string {

@@ -19,6 +19,7 @@ type Config struct {
 	TelegramEnabled    bool
 	TelegramBotToken   string
 	TelegramChatID     string
+	TelegramSlowAlerts bool
 	StatsRetentionDays int
 	CheckerWorkers     int
 }
@@ -40,7 +41,11 @@ func Load() (Config, error) {
 	}
 
 	var err error
-	cfg.TelegramEnabled, err = envBool("TELEGRAM_ENABLED", false)
+	cfg.TelegramEnabled, err = envBool("TELEGRAM_ENABLED", cfg.TelegramBotToken != "" && cfg.TelegramChatID != "")
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.TelegramSlowAlerts, err = envBool("TELEGRAM_SLOW_ALERTS", true)
 	if err != nil {
 		return Config{}, err
 	}

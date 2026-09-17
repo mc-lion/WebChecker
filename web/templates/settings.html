@@ -2,7 +2,7 @@
 <section class="page-head">
     <div>
         <h1>Настройки</h1>
-        <p class="muted">Telegram и параметры процесса</p>
+        <p class="muted">Telegram, резервные копии и параметры процесса</p>
     </div>
 </section>
 
@@ -12,8 +12,16 @@
         <dl>
             <div><dt>Уведомления</dt><dd>{{if .TelegramEnabled}}включены{{else}}выключены{{end}}</dd></div>
             <div><dt>Токен и chat id</dt><dd>{{if .TelegramConfigured}}заданы{{else}}не заданы{{end}}</dd></div>
+            <div><dt>Алерты о медленном ответе</dt><dd>{{if .TelegramSlowAlerts}}включены{{else}}выключены{{end}}</dd></div>
         </dl>
         <p class="muted">Секреты задаются переменными окружения <code>TELEGRAM_BOT_TOKEN</code> и <code>TELEGRAM_CHAT_ID</code>. Токен в интерфейсе не показывается.</p>
+        {{if and .TelegramConfigured (not .TelegramEnabled)}}
+        <p class="banner banner-err">Заданы токен и chat id, но <code>TELEGRAM_ENABLED=false</code>. Тестовое сообщение уходит, алерты о недоступности и медленном ответе — нет. Поставьте <code>TELEGRAM_ENABLED=true</code> и перезапустите контейнер.</p>
+        {{end}}
+        {{if and .TelegramEnabled (not .TelegramSlowAlerts)}}
+        <p class="muted">Алерты о долгом ответе выключены переменной <code>TELEGRAM_SLOW_ALERTS=false</code>.</p>
+        {{end}}
+        <p class="muted">Команды в чате: <code>list</code>, <code>stat</code>, <code>stat id</code>, <code>help</code>. Сообщение о медленном ответе уходит после N подряд медленных проверок (поле «Алерт после N подряд проблем»).</p>
         <form method="post" action="/settings/telegram-test">
             <button type="submit" class="btn btn-primary" {{if not .TelegramConfigured}}disabled{{end}}>Отправить тест</button>
         </form>
@@ -27,4 +35,19 @@
         <p class="muted">Чтобы сменить логин, пароль или параметры БД, обновите переменные окружения и перезапустите контейнер.</p>
     </article>
 </div>
+
+<article class="card">
+    <h2>Экспорт и импорт</h2>
+    <p class="muted">Сохраните мониторы, историю проверок и состояния алертов в JSON — или восстановите их из файла. Импорт полностью заменяет текущие данные.</p>
+    <div class="form-actions">
+        <a class="btn btn-primary" href="/settings/export">Скачать JSON</a>
+    </div>
+    <form method="post" action="/settings/import" enctype="multipart/form-data" class="import-form" data-confirm="Импорт заменит все мониторы, проверки и состояния алертов. Продолжить?">
+        <label>
+            Файл дампа
+            <input type="file" name="dump" accept="application/json,.json" required>
+        </label>
+        <button type="submit" class="btn">Импортировать</button>
+    </form>
+</article>
 {{end}}

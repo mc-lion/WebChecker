@@ -122,6 +122,13 @@ func (s *Scheduler) runCheck(ctx context.Context, mon models.Monitor) {
 	}()
 
 	result := s.checker.Check(ctx, mon)
+	if !result.OK || result.Slow {
+		status := 0
+		if result.StatusCode != nil {
+			status = *result.StatusCode
+		}
+		slog.Info("check problem", "monitor_id", mon.ID, "name", mon.Name, "ok", result.OK, "slow", result.Slow, "status", status, "ms", result.ResponseMS, "slow_threshold_ms", mon.SlowThresholdMS, "error", result.ErrorText)
+	}
 	if err := s.store.InsertCheck(ctx, result); err != nil {
 		if ctx.Err() != nil {
 			return

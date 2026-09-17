@@ -76,3 +76,36 @@ func TestCheckSlow(t *testing.T) {
 		t.Fatalf("expected slow, got %+v", res)
 	}
 }
+
+func TestIsSlowThresholdInclusive(t *testing.T) {
+	if !isSlow(200, 200) {
+		t.Fatal("response equal to threshold should be slow")
+	}
+	if isSlow(200, 199) {
+		t.Fatal("response below threshold should not be slow")
+	}
+	if isSlow(0, 500) {
+		t.Fatal("zero threshold should not mark slow")
+	}
+}
+
+func TestCheckTimeoutMarkedSlow(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(1500 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+
+	res := New().Check(context.Background(), models.Monitor{
+		URL:             ts.URL,
+		ExpectedStatus:  200,
+		TimeoutSeconds:  1,
+		SlowThresholdMS: 200,
+	})
+	if res.OK {
+		t.Fatal("expected timeout failure")
+	}
+	if !res.Slow {
+		t.Fatalf("timeout longer than slow threshold should be slow, got %+v", res)
+	}
+}

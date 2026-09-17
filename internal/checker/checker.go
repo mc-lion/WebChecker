@@ -57,23 +57,29 @@ func (c *Checker) Check(ctx context.Context, mon models.Monitor) models.Check {
 
 	start := time.Now()
 	resp, err := c.client.Do(req)
+	if resp != nil {
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))
+	}
 	result.ResponseMS = int(time.Since(start).Milliseconds())
 	if result.ResponseMS < 0 {
 		result.ResponseMS = 0
 	}
+	result.Slow = isSlow(mon.SlowThresholdMS, result.ResponseMS)
 	if err != nil {
 		result.ErrorText = err.Error()
 		return result
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))
 
 	code := resp.StatusCode
 	result.StatusCode = &code
 	result.OK = code == mon.ExpectedStatus
-	result.Slow = result.ResponseMS > mon.SlowThresholdMS
 	if !result.OK {
 		result.ErrorText = fmt.Sprintf("unexpected status %d, expected %d", code, mon.ExpectedStatus)
 	}
 	return result
+}
+
+func isSlow(thresholdMS, responseMS int) bool {
+	return thresholdMS > 0 && responseMS >= thresholdMS
 }
