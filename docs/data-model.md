@@ -15,6 +15,7 @@ erDiagram
     varchar name
     varchar url
     int interval_seconds
+    int retry_interval_seconds
     int expected_status
     int timeout_seconds
     int slow_threshold_ms
@@ -55,7 +56,8 @@ erDiagram
 | `id` | Идентификатор, его же ждут команды `/stat <id>` | автоинкремент |
 | `name` | Человекочитаемое имя | 1–255 символов |
 | `url` | Адрес проверки | `http://` или `https://`, до 2048 |
-| `interval_seconds` | Пауза между стартами проверок | 10–86400, по умолчанию 60 |
+| `interval_seconds` | Пауза между стартами проверок после успеха | 10–86400, по умолчанию 60 |
+| `retry_interval_seconds` | Пауза после неуспешной проверки (`ok = 0`) | 1…`interval_seconds`, по умолчанию 10 |
 | `expected_status` | Какой HTTP-код считается успехом | 100–599, по умолчанию 200 |
 | `timeout_seconds` | Дедлайн GET | 1–120, по умолчанию 10 |
 | `slow_threshold_ms` | Порог «долгого» ответа | 1–600000, по умолчанию 3000 |

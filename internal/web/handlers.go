@@ -164,6 +164,10 @@ func (s *Server) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.UpdateMonitor(r.Context(), mon); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
 		s.serverError(w, "update monitor", err)
 		return
 	}

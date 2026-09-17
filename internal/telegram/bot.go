@@ -231,7 +231,7 @@ func commandStatOne(ctx context.Context, st *store.Store, id int64) (string, err
 	fmt.Fprintf(&b, "Uptime 24ч: %s (%d проверок)\n", formatPct(stats.Last24h), stats.Last24h.Total)
 	fmt.Fprintf(&b, "Uptime 7д: %s (%d проверок)\n", formatPct(stats.Last7d), stats.Last7d.Total)
 	fmt.Fprintf(&b, "Среднее / мин / макс 24ч: %s / %s / %s\n", formatAvg(stats.Last24h.AvgMS), formatMS(stats.Last24h.MinMS), formatMS(stats.Last24h.MaxMS))
-	fmt.Fprintf(&b, "Интервал: %d с, ожидаемый статус: %d", mon.IntervalSeconds, mon.ExpectedStatus)
+	fmt.Fprintf(&b, "Интервал: %d с, при ошибке: %d с, ожидаемый статус: %d", mon.IntervalSeconds, mon.RetryIntervalSeconds, mon.ExpectedStatus)
 	return b.String(), nil
 }
 

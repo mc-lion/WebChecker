@@ -32,7 +32,7 @@
             <tr>
                 <td>
                     <a class="name-link" href="/monitors/{{.ID}}">{{.Name}}</a>
-                    <div class="muted tiny">каждые {{.IntervalSeconds}} с</div>
+                    <div class="muted tiny">каждые {{.IntervalSeconds}} с, при ошибке {{.RetryIntervalSeconds}} с</div>
                 </td>
                 <td class="url-cell"><a href="{{.URL}}" target="_blank" rel="noopener">{{.URL}}</a></td>
                 <td><span class="badge badge-{{.State}}">{{stateLabel .State}}</span></td>

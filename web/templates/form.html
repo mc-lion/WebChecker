@@ -22,6 +22,10 @@
             <input type="number" name="interval_seconds" value="{{.Monitor.IntervalSeconds}}" min="10" max="86400" required>
         </label>
         <label>
+            Интервал при ошибке, сек
+            <input type="number" name="retry_interval_seconds" value="{{.Monitor.RetryIntervalSeconds}}" min="1" max="86400" required>
+        </label>
+        <label>
             Ожидаемый статус
             <input type="number" name="expected_status" value="{{.Monitor.ExpectedStatus}}" min="100" max="599" required>
         </label>

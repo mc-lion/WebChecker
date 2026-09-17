@@ -27,7 +27,7 @@ func (s *Store) Ping(ctx context.Context) error {
 
 func (s *Store) ListMonitors(ctx context.Context) ([]models.Monitor, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, url, interval_seconds, expected_status, timeout_seconds,
+		SELECT id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
 		       slow_threshold_ms, fail_threshold, enabled, created_at, updated_at
 		FROM monitors
 		ORDER BY name
@@ -50,7 +50,7 @@ func (s *Store) ListMonitors(ctx context.Context) ([]models.Monitor, error) {
 
 func (s *Store) ListEnabledMonitors(ctx context.Context) ([]models.Monitor, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, url, interval_seconds, expected_status, timeout_seconds,
+		SELECT id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
 		       slow_threshold_ms, fail_threshold, enabled, created_at, updated_at
 		FROM monitors
 		WHERE enabled = 1
@@ -74,7 +74,7 @@ func (s *Store) ListEnabledMonitors(ctx context.Context) ([]models.Monitor, erro
 
 func (s *Store) GetMonitor(ctx context.Context, id int64) (models.Monitor, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, name, url, interval_seconds, expected_status, timeout_seconds,
+		SELECT id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
 		       slow_threshold_ms, fail_threshold, enabled, created_at, updated_at
 		FROM monitors
 		WHERE id = ?
@@ -91,10 +91,10 @@ func (s *Store) GetMonitor(ctx context.Context, id int64) (models.Monitor, error
 
 func (s *Store) CreateMonitor(ctx context.Context, m models.Monitor) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO monitors (name, url, interval_seconds, expected_status, timeout_seconds,
+		INSERT INTO monitors (name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
 		                      slow_threshold_ms, fail_threshold, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, m.Name, m.URL, m.IntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled))
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled))
 	if err != nil {
 		return 0, fmt.Errorf("create monitor: %w", err)
 	}
@@ -108,10 +108,10 @@ func (s *Store) CreateMonitor(ctx context.Context, m models.Monitor) (int64, err
 func (s *Store) UpdateMonitor(ctx context.Context, m models.Monitor) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE monitors
-		SET name = ?, url = ?, interval_seconds = ?, expected_status = ?, timeout_seconds = ?,
+		SET name = ?, url = ?, interval_seconds = ?, retry_interval_seconds = ?, expected_status = ?, timeout_seconds = ?,
 		    slow_threshold_ms = ?, fail_threshold = ?, enabled = ?
 		WHERE id = ?
-	`, m.Name, m.URL, m.IntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), m.ID)
+	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), m.ID)
 	if err != nil {
 		return fmt.Errorf("update monitor: %w", err)
 	}
@@ -119,8 +119,21 @@ func (s *Store) UpdateMonitor(ctx context.Context, m models.Monitor) error {
 	if err != nil {
 		return err
 	}
-	if n == 0 {
+	if n > 0 {
+		return nil
+	}
+	// MySQL reports 0 when SET values are identical to the current row.
+	return s.requireMonitor(ctx, m.ID)
+}
+
+func (s *Store) requireMonitor(ctx context.Context, id int64) error {
+	var one int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM monitors WHERE id = ?`, id).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("get monitor: %w", err)
 	}
 	return nil
 }
@@ -196,7 +209,7 @@ func (s *Store) ListRecentChecks(ctx context.Context, monitorID int64, limit int
 func (s *Store) Dashboard(ctx context.Context) ([]models.DashboardRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
-			m.id, m.name, m.url, m.interval_seconds, m.expected_status, m.timeout_seconds,
+			m.id, m.name, m.url, m.interval_seconds, m.retry_interval_seconds, m.expected_status, m.timeout_seconds,
 			m.slow_threshold_ms, m.fail_threshold, m.enabled, m.created_at, m.updated_at,
 			c.status_code, c.response_ms, c.ok, c.slow, c.error_text, c.checked_at,
 			s.uptime_24h
@@ -236,7 +249,7 @@ func (s *Store) Dashboard(ctx context.Context) ([]models.DashboardRow, error) {
 		var uptime sql.NullFloat64
 
 		err := rows.Scan(
-			&row.ID, &row.Name, &row.URL, &row.IntervalSeconds, &row.ExpectedStatus, &row.TimeoutSeconds,
+			&row.ID, &row.Name, &row.URL, &row.IntervalSeconds, &row.RetryIntervalSeconds, &row.ExpectedStatus, &row.TimeoutSeconds,
 			&row.SlowThresholdMS, &row.FailThreshold, &enabled, &row.CreatedAt, &row.UpdatedAt,
 			&lastStatus, &lastMS, &lastOK, &lastSlow, &lastErr, &lastAt, &uptime,
 		)
@@ -516,7 +529,7 @@ func (s *Store) ImportDump(ctx context.Context, dump models.Dump) error {
 
 func (s *Store) listMonitorsByID(ctx context.Context) ([]models.Monitor, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, url, interval_seconds, expected_status, timeout_seconds,
+		SELECT id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
 		       slow_threshold_ms, fail_threshold, enabled, created_at, updated_at
 		FROM monitors
 		ORDER BY id
@@ -588,6 +601,12 @@ func insertMonitorTx(ctx context.Context, tx *sql.Tx, m models.Monitor) (int64, 
 	if m.IntervalSeconds < 1 {
 		m.IntervalSeconds = 60
 	}
+	if m.RetryIntervalSeconds < 1 {
+		m.RetryIntervalSeconds = 10
+	}
+	if m.RetryIntervalSeconds > m.IntervalSeconds {
+		m.RetryIntervalSeconds = m.IntervalSeconds
+	}
 	if m.ExpectedStatus < 1 {
 		m.ExpectedStatus = 200
 	}
@@ -610,10 +629,10 @@ func insertMonitorTx(ctx context.Context, tx *sql.Tx, m models.Monitor) (int64, 
 
 	if m.ID > 0 {
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO monitors (id, name, url, interval_seconds, expected_status, timeout_seconds,
+			INSERT INTO monitors (id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
 			                      slow_threshold_ms, fail_threshold, enabled, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, m.ID, m.Name, m.URL, m.IntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), created, updated)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, m.ID, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), created, updated)
 		if err != nil {
 			return 0, fmt.Errorf("import monitor %d: %w", m.ID, err)
 		}
@@ -621,10 +640,10 @@ func insertMonitorTx(ctx context.Context, tx *sql.Tx, m models.Monitor) (int64, 
 	}
 
 	res, err := tx.ExecContext(ctx, `
-		INSERT INTO monitors (name, url, interval_seconds, expected_status, timeout_seconds,
+		INSERT INTO monitors (name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
 		                      slow_threshold_ms, fail_threshold, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, m.Name, m.URL, m.IntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), created, updated)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), created, updated)
 	if err != nil {
 		return 0, fmt.Errorf("import monitor: %w", err)
 	}
@@ -714,7 +733,7 @@ func scanMonitor(sc scanner) (models.Monitor, error) {
 	var m models.Monitor
 	var enabled int
 	err := sc.Scan(
-		&m.ID, &m.Name, &m.URL, &m.IntervalSeconds, &m.ExpectedStatus, &m.TimeoutSeconds,
+		&m.ID, &m.Name, &m.URL, &m.IntervalSeconds, &m.RetryIntervalSeconds, &m.ExpectedStatus, &m.TimeoutSeconds,
 		&m.SlowThresholdMS, &m.FailThreshold, &enabled, &m.CreatedAt, &m.UpdatedAt,
 	)
 	if err != nil {

@@ -12,6 +12,11 @@ import (
 	"webchecker/internal/store"
 )
 
+type runState struct {
+	lastRun time.Time
+	lastOK  bool
+}
+
 type Scheduler struct {
 	store     *store.Store
 	checker   *checker.Checker
@@ -20,7 +25,7 @@ type Scheduler struct {
 	retention time.Duration
 
 	mu       sync.Mutex
-	lastRun  map[int64]time.Time
+	state    map[int64]runState
 	inFlight map[int64]struct{}
 }
 
@@ -34,7 +39,7 @@ func New(st *store.Store, chk *checker.Checker, al *alerter.Alerter, workers int
 		alerter:   al,
 		workers:   workers,
 		retention: time.Duration(retentionDays) * 24 * time.Hour,
-		lastRun:   make(map[int64]time.Time),
+		state:     make(map[int64]runState),
 		inFlight:  make(map[int64]struct{}),
 	}
 }
@@ -90,7 +95,7 @@ func (s *Scheduler) seedLastRuns(ctx context.Context, monitors []models.Monitor,
 	var missing []models.Monitor
 	s.mu.Lock()
 	for _, mon := range monitors {
-		if _, ok := s.lastRun[mon.ID]; !ok {
+		if _, ok := s.state[mon.ID]; !ok {
 			missing = append(missing, mon)
 		}
 	}
@@ -105,10 +110,13 @@ func (s *Scheduler) seedLastRuns(ctx context.Context, monitors []models.Monitor,
 			slog.Error("scheduler last check failed", "monitor_id", mon.ID, "error", err)
 			last = nil
 		}
-		seeded := initialLastRun(now, mon, last)
+		seeded := runState{
+			lastRun: initialLastRun(now, mon, last),
+			lastOK:  last == nil || last.OK,
+		}
 		s.mu.Lock()
-		if _, exists := s.lastRun[mon.ID]; !exists {
-			s.lastRun[mon.ID] = seeded
+		if _, exists := s.state[mon.ID]; !exists {
+			s.state[mon.ID] = seeded
 		}
 		s.mu.Unlock()
 	}
@@ -124,38 +132,67 @@ func (s *Scheduler) enqueueDue(monitors []models.Monitor, now time.Time, jobs ch
 		if _, busy := s.inFlight[mon.ID]; busy {
 			continue
 		}
-		last, ok := s.lastRun[mon.ID]
-		interval := monitorInterval(mon)
-		if ok && now.Sub(last) < interval {
+		st, ok := s.state[mon.ID]
+		wait := waitDuration(mon, !ok || st.lastOK)
+		if ok && now.Sub(st.lastRun) < wait {
 			continue
 		}
 		s.inFlight[mon.ID] = struct{}{}
-		s.lastRun[mon.ID] = now
+		prevRun := st.lastRun
+		st.lastRun = now
+		s.state[mon.ID] = st
 		select {
 		case jobs <- mon:
 		default:
 			delete(s.inFlight, mon.ID)
-			delete(s.lastRun, mon.ID)
+			st.lastRun = prevRun
+			s.state[mon.ID] = st
 		}
 	}
-	for id := range s.lastRun {
+	for id := range s.state {
 		if _, ok := active[id]; !ok {
-			delete(s.lastRun, id)
+			delete(s.state, id)
 		}
 	}
 }
 
 func initialLastRun(now time.Time, mon models.Monitor, last *models.Check) time.Time {
-	interval := monitorInterval(mon)
-	if last != nil && !last.CheckedAt.IsZero() && now.Sub(last.CheckedAt) < interval {
+	if last == nil || last.CheckedAt.IsZero() {
+		return hashPhase(now, mon.ID, monitorInterval(mon))
+	}
+	wait := waitDuration(mon, last.OK)
+	if now.Sub(last.CheckedAt) < wait {
 		return last.CheckedAt
 	}
+	return hashPhase(now, mon.ID, wait)
+}
+
+func waitDuration(mon models.Monitor, lastOK bool) time.Duration {
+	if !lastOK {
+		return retryInterval(mon)
+	}
+	return monitorInterval(mon)
+}
+
+func hashPhase(now time.Time, id int64, interval time.Duration) time.Time {
 	sec := int64(interval / time.Second)
 	if sec < 1 {
 		sec = 1
 	}
-	offset := time.Duration(mon.ID%sec) * time.Second
+	offset := time.Duration(id%sec) * time.Second
 	return now.Add(-interval + offset)
+}
+
+func retryInterval(mon models.Monitor) time.Duration {
+	d := time.Duration(mon.RetryIntervalSeconds) * time.Second
+	if d < time.Second {
+		d = time.Second
+	}
+	limit := monitorInterval(mon)
+	if d > limit {
+		return limit
+	}
+	return d
 }
 
 func monitorInterval(mon models.Monitor) time.Duration {
@@ -174,6 +211,12 @@ func (s *Scheduler) runCheck(ctx context.Context, mon models.Monitor) {
 	}()
 
 	result := s.checker.Check(ctx, mon)
+	s.mu.Lock()
+	if st, ok := s.state[mon.ID]; ok {
+		st.lastOK = result.OK
+		s.state[mon.ID] = st
+	}
+	s.mu.Unlock()
 	if !result.OK || result.Slow {
 		status := 0
 		if result.StatusCode != nil {

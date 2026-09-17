@@ -58,7 +58,7 @@ flowchart TB
 
 | Контур | Где | Что делает |
 | --- | --- | --- |
-| Планировщик | `internal/scheduler` | Раз в секунду выбирает due-мониторы и отдаёт их воркерам. При старте фазы разносит по `id % interval` и, если есть, по последней проверке в БД |
+| Планировщик | `internal/scheduler` | Раз в секунду выбирает due-мониторы и отдаёт их воркерам. После успеха ждёт `interval_seconds`, после ошибки — `retry_interval_seconds`. При старте фазы разносит по `id % interval` и, если есть, по последней проверке в БД |
 | HTTP | `internal/web` | Дашборд, CRUD, статистика, настройки, экспорт/импорт |
 | Бот | `internal/telegram` | Long polling `getUpdates`, команды `list` / `stat` / `help` |
 
@@ -115,7 +115,8 @@ webChecker/
 │       └── js/app.js, chart.umd.min.js
 ├── migrations/
 │   ├── embed.go
-│   └── 001_init.sql            monitors, checks, alert_states
+│   ├── 001_init.sql            monitors, checks, alert_states
+│   └── 002_retry_interval.sql  retry_interval_seconds
 ├── docs/                       эта документация
 ├── Dockerfile
 ├── docker-compose.yml
