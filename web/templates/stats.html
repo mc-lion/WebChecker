@@ -1,0 +1,85 @@
+{{define "content"}}
+<section class="page-head">
+    <div>
+        <h1>{{.Monitor.Name}}</h1>
+        <p class="muted"><a href="{{.Monitor.URL}}" target="_blank" rel="noopener">{{.Monitor.URL}}</a></p>
+    </div>
+    <div class="actions">
+        <a class="btn" href="/">К дашборду</a>
+        <a class="btn" href="/monitors/{{.Monitor.ID}}/edit">Изменить</a>
+    </div>
+</section>
+
+<div class="meta-row">
+    <span>Интервал: {{.Monitor.IntervalSeconds}} с</span>
+    <span>Ожидаемый статус: {{.Monitor.ExpectedStatus}}</span>
+    <span>Таймаут: {{.Monitor.TimeoutSeconds}} с</span>
+    <span>Медленный ответ: {{.Monitor.SlowThresholdMS}} мс</span>
+    <span>Алерт после: {{.Monitor.FailThreshold}} проблем</span>
+    <span>{{if .Monitor.Enabled}}Включён{{else}}Выключен{{end}}</span>
+</div>
+
+<div class="stats-grid">
+    <article class="card">
+        <h2>24 часа</h2>
+        <dl>
+            <div><dt>Проверок</dt><dd>{{.Stats.Last24h.Total}}</dd></div>
+            <div><dt>Uptime</dt><dd>{{printf "%.1f%%" .Stats.Last24h.UptimePct}}</dd></div>
+            <div><dt>Медленных</dt><dd>{{.Stats.Last24h.SlowCount}}</dd></div>
+            <div><dt>Среднее</dt><dd>{{fmtFloat .Stats.Last24h.AvgMS}}</dd></div>
+            <div><dt>Мин / макс</dt><dd>{{fmtMS .Stats.Last24h.MinMS}} / {{fmtMS .Stats.Last24h.MaxMS}}</dd></div>
+        </dl>
+    </article>
+    <article class="card">
+        <h2>7 дней</h2>
+        <dl>
+            <div><dt>Проверок</dt><dd>{{.Stats.Last7d.Total}}</dd></div>
+            <div><dt>Uptime</dt><dd>{{printf "%.1f%%" .Stats.Last7d.UptimePct}}</dd></div>
+            <div><dt>Медленных</dt><dd>{{.Stats.Last7d.SlowCount}}</dd></div>
+            <div><dt>Среднее</dt><dd>{{fmtFloat .Stats.Last7d.AvgMS}}</dd></div>
+            <div><dt>Мин / макс</dt><dd>{{fmtMS .Stats.Last7d.MinMS}} / {{fmtMS .Stats.Last7d.MaxMS}}</dd></div>
+        </dl>
+    </article>
+</div>
+
+<article class="card">
+    <h2>Время ответа</h2>
+    <div class="chart-box">
+        <canvas id="latency-chart" data-src="/monitors/{{.Monitor.ID}}/checks.json"></canvas>
+    </div>
+</article>
+
+<article class="card">
+    <h2>Последние проверки</h2>
+    {{if not .Checks}}
+        <p class="muted">Ещё нет данных. Первая проверка выполняется сразу после добавления.</p>
+    {{else}}
+    <div class="table-wrap">
+        <table class="data">
+            <thead>
+                <tr>
+                    <th>Время</th>
+                    <th>Статус</th>
+                    <th>Ответ</th>
+                    <th>OK</th>
+                    <th>Медленно</th>
+                    <th>Ошибка</th>
+                </tr>
+            </thead>
+            <tbody>
+            {{range .Checks}}
+                <tr>
+                    <td>{{fmtTimeVal .CheckedAt}}</td>
+                    <td>{{statusText .StatusCode}}</td>
+                    <td>{{.ResponseMS}} мс</td>
+                    <td>{{if .OK}}да{{else}}нет{{end}}</td>
+                    <td>{{if .Slow}}да{{else}}нет{{end}}</td>
+                    <td class="err-cell">{{.ErrorText}}</td>
+                </tr>
+            {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{end}}
+</article>
+{{end}}

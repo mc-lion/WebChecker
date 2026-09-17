@@ -1,0 +1,28 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {{if .Refresh}}<meta http-equiv="refresh" content="30">{{end}}
+    <title>{{if .Title}}{{.Title}} — {{end}}webChecker</title>
+    <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+    <header class="topbar">
+        <a class="brand" href="/">webChecker</a>
+        <nav>
+            <a href="/" class="{{if eq .Active "dashboard"}}is-active{{end}}">Дашборд</a>
+            <a href="/settings" class="{{if eq .Active "settings"}}is-active{{end}}">Настройки</a>
+        </nav>
+    </header>
+    <main class="container">
+        {{if .Flash}}<div class="banner banner-ok">{{.Flash}}</div>{{end}}
+        {{if .Error}}<div class="banner banner-err">{{.Error}}</div>{{end}}
+        {{template "content" .}}
+    </main>
+    <script src="/static/js/chart.umd.min.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
+{{end}}

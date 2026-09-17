@@ -1,0 +1,6 @@
+.env
+/webchecker
+*.exe
+*.test
+*.out
+tmp/

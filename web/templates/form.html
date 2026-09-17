@@ -1,0 +1,50 @@
+{{define "content"}}
+<section class="page-head">
+    <div>
+        <h1>{{if .IsNew}}Новый URL{{else}}Редактирование{{end}}</h1>
+        <p class="muted">GET-проверка статуса и времени ответа</p>
+    </div>
+    <a class="btn" href="/">К дашборду</a>
+</section>
+
+<form method="post" action="{{.Action}}" class="card form">
+    <label>
+        Имя
+        <input type="text" name="name" value="{{.Monitor.Name}}" required maxlength="255" placeholder="Например, Главная сайта">
+    </label>
+    <label>
+        URL
+        <input type="url" name="url" value="{{.Monitor.URL}}" required maxlength="2048" placeholder="https://example.com/health">
+    </label>
+    <div class="grid-2">
+        <label>
+            Интервал, сек
+            <input type="number" name="interval_seconds" value="{{.Monitor.IntervalSeconds}}" min="10" max="86400" required>
+        </label>
+        <label>
+            Ожидаемый статус
+            <input type="number" name="expected_status" value="{{.Monitor.ExpectedStatus}}" min="100" max="599" required>
+        </label>
+        <label>
+            Таймаут, сек
+            <input type="number" name="timeout_seconds" value="{{.Monitor.TimeoutSeconds}}" min="1" max="120" required>
+        </label>
+        <label>
+            Порог долгого ответа, мс
+            <input type="number" name="slow_threshold_ms" value="{{.Monitor.SlowThresholdMS}}" min="1" max="600000" required>
+        </label>
+        <label>
+            Алерт после N подряд проблем
+            <input type="number" name="fail_threshold" value="{{.Monitor.FailThreshold}}" min="1" max="100" required>
+        </label>
+        <label class="checkbox">
+            <input type="checkbox" name="enabled" value="1" {{if .Monitor.Enabled}}checked{{end}}>
+            Монитор включён
+        </label>
+    </div>
+    <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Сохранить</button>
+        <a class="btn" href="/">Отмена</a>
+    </div>
+</form>
+{{end}}

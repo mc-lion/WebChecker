@@ -1,0 +1,8 @@
+.git
+.env
+*.md
+tmp/
+webchecker
+*.exe
+*.test
+*.out

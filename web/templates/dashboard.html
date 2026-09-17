@@ -1,0 +1,59 @@
+{{define "content"}}
+<section class="page-head">
+    <div>
+        <h1>Мониторы</h1>
+        <p class="muted">Проверка доступности URL по расписанию</p>
+    </div>
+    <a class="btn btn-primary" href="/monitors/new">Добавить URL</a>
+</section>
+
+{{if not .Rows}}
+<div class="empty">
+    <p>Пока нет мониторов. Добавьте первый URL, чтобы начать сбор статистики.</p>
+    <a class="btn btn-primary" href="/monitors/new">Добавить URL</a>
+</div>
+{{else}}
+<div class="table-wrap">
+    <table class="data">
+        <thead>
+            <tr>
+                <th>Имя</th>
+                <th>URL</th>
+                <th>Состояние</th>
+                <th>Статус</th>
+                <th>Ответ</th>
+                <th>Uptime 24ч</th>
+                <th>Проверка</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+        {{range .Rows}}
+            <tr>
+                <td>
+                    <a class="name-link" href="/monitors/{{.ID}}">{{.Name}}</a>
+                    <div class="muted tiny">каждые {{.IntervalSeconds}} с</div>
+                </td>
+                <td class="url-cell"><a href="{{.URL}}" target="_blank" rel="noopener">{{.URL}}</a></td>
+                <td><span class="badge badge-{{.State}}">{{stateLabel .State}}</span></td>
+                <td>{{statusText .LastStatusCode}}</td>
+                <td>{{fmtMS .LastResponseMS}}</td>
+                <td>{{fmtPct .Uptime24h}}</td>
+                <td>{{fmtTime .LastCheckedAt}}</td>
+                <td class="actions">
+                    <form method="post" action="/monitors/{{.ID}}/toggle">
+                        <button type="submit" class="btn btn-small">{{if .Enabled}}Выкл{{else}}Вкл{{end}}</button>
+                    </form>
+                    <a class="btn btn-small" href="/monitors/{{.ID}}">Статистика</a>
+                    <a class="btn btn-small" href="/monitors/{{.ID}}/edit">Изменить</a>
+                    <form method="post" action="/monitors/{{.ID}}/delete" data-confirm="Удалить монитор «{{.Name}}»?">
+                        <button type="submit" class="btn btn-small btn-danger">Удалить</button>
+                    </form>
+                </td>
+            </tr>
+        {{end}}
+        </tbody>
+    </table>
+</div>
+{{end}}
+{{end}}

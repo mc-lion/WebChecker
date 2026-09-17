@@ -1,0 +1,30 @@
+{{define "content"}}
+<section class="page-head">
+    <div>
+        <h1>Настройки</h1>
+        <p class="muted">Telegram и параметры процесса</p>
+    </div>
+</section>
+
+<div class="stats-grid">
+    <article class="card">
+        <h2>Telegram</h2>
+        <dl>
+            <div><dt>Уведомления</dt><dd>{{if .TelegramEnabled}}включены{{else}}выключены{{end}}</dd></div>
+            <div><dt>Токен и chat id</dt><dd>{{if .TelegramConfigured}}заданы{{else}}не заданы{{end}}</dd></div>
+        </dl>
+        <p class="muted">Секреты задаются переменными окружения <code>TELEGRAM_BOT_TOKEN</code> и <code>TELEGRAM_CHAT_ID</code>. Токен в интерфейсе не показывается.</p>
+        <form method="post" action="/settings/telegram-test">
+            <button type="submit" class="btn btn-primary" {{if not .TelegramConfigured}}disabled{{end}}>Отправить тест</button>
+        </form>
+    </article>
+    <article class="card">
+        <h2>Приложение</h2>
+        <dl>
+            <div><dt>Хранение статистики</dt><dd>{{.RetentionDays}} дней</dd></div>
+            <div><dt>Воркеры проверок</dt><dd>{{.CheckerWorkers}}</dd></div>
+        </dl>
+        <p class="muted">Чтобы сменить логин, пароль или параметры БД, обновите переменные окружения и перезапустите контейнер.</p>
+    </article>
+</div>
+{{end}}

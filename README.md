@@ -1,0 +1,84 @@
+# webChecker
+
+Приложение на Go 1.26 для периодической проверки доступности URL. Хранит настройки и статистику в MySQL, показывает web-интерфейс и может слать уведомления в Telegram.
+
+## Возможности
+
+- GET-проверки URL с заданным интервалом, ожидаемым HTTP-статусом, таймаутом и порогом долгого ответа
+- Дашборд, CRUD мониторов, статистика за 24 часа и 7 дней, график времени ответа
+- HTTP Basic Auth (логин и пароль из переменных окружения)
+- Telegram: одно сообщение после N подряд проблем и отдельное — когда URL снова в норме
+- Хранение истории проверок в MySQL, очистка записей старше `STATS_RETENTION_DAYS`
+
+## Запуск в Docker
+
+```bash
+cp .env.example .env
+# при необходимости отредактируйте .env
+docker compose up --build
+```
+
+Интерфейс: [http://localhost:8080](http://localhost:8080)
+
+По умолчанию:
+
+- логин `admin`
+- пароль `changeme`
+
+`GET /healthz` доступен без авторизации и возвращает `ok`, когда MySQL отвечает.
+
+## Переменные окружения
+
+| Переменная | Описание | По умолчанию |
+| --- | --- | --- |
+| `HTTP_ADDR` | Адрес HTTP-сервера | `:8080` |
+| `BASIC_AUTH_USER` | Логин web UI | обязательно |
+| `BASIC_AUTH_PASSWORD` | Пароль web UI | обязательно |
+| `MYSQL_HOST` | Хост MySQL | `mysql` |
+| `MYSQL_PORT` | Порт MySQL | `3306` |
+| `MYSQL_USER` | Пользователь MySQL | обязательно |
+| `MYSQL_DATABASE` | Имя БД | обязательно |
+| `MYSQL_PASSWORD` | Пароль MySQL | пусто |
+| `TELEGRAM_ENABLED` | Включить уведомления (`true`/`false`) | `false` |
+| `TELEGRAM_BOT_TOKEN` | Токен бота | пусто |
+| `TELEGRAM_CHAT_ID` | Chat id (личный чат или группа) | пусто |
+| `STATS_RETENTION_DAYS` | Сколько дней хранить проверки | `30` |
+| `CHECKER_WORKERS` | Число параллельных проверок | `8` |
+| `TZ` | Часовой пояс отображения времени | `Europe/Moscow` |
+
+Если `TELEGRAM_ENABLED=true`, токен и chat id обязательны.
+
+## Telegram
+
+1. Создайте бота у [@BotFather](https://t.me/BotFather) и скопируйте токен.
+2. Напишите боту любое сообщение (или добавьте его в группу).
+3. Откройте `https://api.telegram.org/bot<TOKEN>/getUpdates` и возьмите `chat.id`.
+4. Пропишите `TELEGRAM_ENABLED=true`, `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID` в `.env`.
+5. Перезапустите `docker compose up -d` и на странице «Настройки» отправьте тестовое сообщение.
+
+Алерты:
+
+- после N подряд неуспешных или медленных проверок — сообщение о недоступности и/или долгом ответе;
+- когда статус снова совпадает с ожидаемым и время ответа в норме — сообщение о восстановлении;
+- повторные сообщения на каждый тик не отправляются, пока состояние не изменится.
+
+## Локальная сборка без Docker
+
+Нужны Go 1.26 и доступный MySQL.
+
+```bash
+export BASIC_AUTH_USER=admin BASIC_AUTH_PASSWORD=changeme
+export MYSQL_HOST=127.0.0.1 MYSQL_USER=webchecker MYSQL_PASSWORD=webchecker MYSQL_DATABASE=webchecker
+go run ./cmd/webchecker
+```
+
+## Структура
+
+```
+cmd/webchecker/     точка входа
+internal/           конфиг, БД, проверки, планировщик, Telegram, HTTP
+web/templates/      HTML
+web/static/css/     CSS
+web/static/js/      JS (включая Chart.js)
+migrations/         SQL-миграции
+```
