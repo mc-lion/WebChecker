@@ -80,38 +80,90 @@ func (s *Scheduler) Run(ctx context.Context) {
 			}
 
 			now := time.Now()
-			s.mu.Lock()
-			active := make(map[int64]struct{}, len(monitors))
-			for _, mon := range monitors {
-				active[mon.ID] = struct{}{}
-				if _, busy := s.inFlight[mon.ID]; busy {
-					continue
-				}
-				last, ok := s.lastRun[mon.ID]
-				interval := time.Duration(mon.IntervalSeconds) * time.Second
-				if interval < time.Second {
-					interval = time.Second
-				}
-				if ok && now.Sub(last) < interval {
-					continue
-				}
-				s.inFlight[mon.ID] = struct{}{}
-				s.lastRun[mon.ID] = now
-				select {
-				case jobs <- mon:
-				default:
-					delete(s.inFlight, mon.ID)
-					delete(s.lastRun, mon.ID)
-				}
-			}
-			for id := range s.lastRun {
-				if _, ok := active[id]; !ok {
-					delete(s.lastRun, id)
-				}
-			}
-			s.mu.Unlock()
+			s.seedLastRuns(ctx, monitors, now)
+			s.enqueueDue(monitors, now, jobs)
 		}
 	}
+}
+
+func (s *Scheduler) seedLastRuns(ctx context.Context, monitors []models.Monitor, now time.Time) {
+	var missing []models.Monitor
+	s.mu.Lock()
+	for _, mon := range monitors {
+		if _, ok := s.lastRun[mon.ID]; !ok {
+			missing = append(missing, mon)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, mon := range missing {
+		last, err := s.store.LastCheck(ctx, mon.ID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Error("scheduler last check failed", "monitor_id", mon.ID, "error", err)
+			last = nil
+		}
+		seeded := initialLastRun(now, mon, last)
+		s.mu.Lock()
+		if _, exists := s.lastRun[mon.ID]; !exists {
+			s.lastRun[mon.ID] = seeded
+		}
+		s.mu.Unlock()
+	}
+}
+
+func (s *Scheduler) enqueueDue(monitors []models.Monitor, now time.Time, jobs chan models.Monitor) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	active := make(map[int64]struct{}, len(monitors))
+	for _, mon := range monitors {
+		active[mon.ID] = struct{}{}
+		if _, busy := s.inFlight[mon.ID]; busy {
+			continue
+		}
+		last, ok := s.lastRun[mon.ID]
+		interval := monitorInterval(mon)
+		if ok && now.Sub(last) < interval {
+			continue
+		}
+		s.inFlight[mon.ID] = struct{}{}
+		s.lastRun[mon.ID] = now
+		select {
+		case jobs <- mon:
+		default:
+			delete(s.inFlight, mon.ID)
+			delete(s.lastRun, mon.ID)
+		}
+	}
+	for id := range s.lastRun {
+		if _, ok := active[id]; !ok {
+			delete(s.lastRun, id)
+		}
+	}
+}
+
+func initialLastRun(now time.Time, mon models.Monitor, last *models.Check) time.Time {
+	interval := monitorInterval(mon)
+	if last != nil && !last.CheckedAt.IsZero() && now.Sub(last.CheckedAt) < interval {
+		return last.CheckedAt
+	}
+	sec := int64(interval / time.Second)
+	if sec < 1 {
+		sec = 1
+	}
+	offset := time.Duration(mon.ID%sec) * time.Second
+	return now.Add(-interval + offset)
+}
+
+func monitorInterval(mon models.Monitor) time.Duration {
+	interval := time.Duration(mon.IntervalSeconds) * time.Second
+	if interval < time.Second {
+		return time.Second
+	}
+	return interval
 }
 
 func (s *Scheduler) runCheck(ctx context.Context, mon models.Monitor) {
