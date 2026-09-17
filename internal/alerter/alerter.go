@@ -8,16 +8,21 @@ import (
 
 	"webchecker/internal/models"
 	"webchecker/internal/store"
-	"webchecker/internal/telegram"
 )
 
-type Alerter struct {
-	store *store.Store
-	tg    *telegram.Client
+type Notifier interface {
+	Notify(ctx context.Context, text string) error
+	Enabled() bool
 }
 
-func New(st *store.Store, tg *telegram.Client) *Alerter {
-	return &Alerter{store: st, tg: tg}
+type Alerter struct {
+	store      *store.Store
+	tg         Notifier
+	slowAlerts bool
+}
+
+func New(st *store.Store, tg Notifier, slowAlerts bool) *Alerter {
+	return &Alerter{store: st, tg: tg, slowAlerts: slowAlerts}
 }
 
 func (a *Alerter) Handle(ctx context.Context, mon models.Monitor, check models.Check) {
@@ -27,48 +32,67 @@ func (a *Alerter) Handle(ctx context.Context, mon models.Monitor, check models.C
 		return
 	}
 
-	problem := !check.OK || check.Slow
-	if !problem {
-		if state.DownAlerted || state.SlowAlerted {
-			msg := recoveryMessage(mon, check)
-			if err := a.tg.Notify(ctx, msg); err != nil {
-				slog.Error("telegram recovery notify failed", "monitor_id", mon.ID, "error", err)
-			} else {
-				state.DownAlerted = false
-				state.SlowAlerted = false
-			}
+	next, sendDown, sendSlow, sendRecovery := evaluate(state, mon, check, a.slowAlerts)
+
+	if sendRecovery {
+		if err := a.notify(ctx, "recovery", mon, recoveryMessage(mon, check)); err != nil {
+			slog.Error("telegram recovery notify failed", "monitor_id", mon.ID, "error", err)
 		} else {
-			state.DownAlerted = false
-			state.SlowAlerted = false
+			next.DownAlerted = false
+			next.SlowAlerted = false
 		}
-		state.ConsecutiveProblems = 0
-		if err := a.store.SaveAlertState(ctx, state); err != nil {
-			slog.Error("alert state save failed", "monitor_id", mon.ID, "error", err)
-		}
-		return
 	}
-
-	state.ConsecutiveProblems++
-	if state.ConsecutiveProblems >= mon.FailThreshold {
-		if !check.OK && !state.DownAlerted {
-			if err := a.tg.Notify(ctx, downMessage(mon, check)); err != nil {
-				slog.Error("telegram down notify failed", "monitor_id", mon.ID, "error", err)
-			} else {
-				state.DownAlerted = true
-			}
+	if sendDown {
+		if err := a.notify(ctx, "down", mon, downMessage(mon, check)); err != nil {
+			slog.Error("telegram down notify failed", "monitor_id", mon.ID, "error", err)
+		} else {
+			next.DownAlerted = true
 		}
-		if check.Slow && !state.SlowAlerted {
-			if err := a.tg.Notify(ctx, slowMessage(mon, check)); err != nil {
-				slog.Error("telegram slow notify failed", "monitor_id", mon.ID, "error", err)
-			} else {
-				state.SlowAlerted = true
-			}
+	}
+	if sendSlow {
+		if err := a.notify(ctx, "slow", mon, slowMessage(mon, check)); err != nil {
+			slog.Error("telegram slow notify failed", "monitor_id", mon.ID, "error", err)
+		} else {
+			next.SlowAlerted = true
 		}
 	}
 
-	if err := a.store.SaveAlertState(ctx, state); err != nil {
+	if err := a.store.SaveAlertState(ctx, next); err != nil {
 		slog.Error("alert state save failed", "monitor_id", mon.ID, "error", err)
 	}
+}
+
+func (a *Alerter) notify(ctx context.Context, kind string, mon models.Monitor, text string) error {
+	if a.tg == nil || !a.tg.Enabled() {
+		slog.Warn("telegram alert skipped", "kind", kind, "monitor_id", mon.ID, "reason", "alerts disabled")
+		return nil
+	}
+	slog.Info("telegram alert", "kind", kind, "monitor_id", mon.ID, "name", mon.Name)
+	return a.tg.Notify(ctx, text)
+}
+
+func evaluate(state models.AlertState, mon models.Monitor, check models.Check, slowAlerts bool) (models.AlertState, bool, bool, bool) {
+	slowProblem := check.Slow && slowAlerts
+	problem := !check.OK || slowProblem
+	next := state
+
+	if !problem {
+		sendRecovery := state.DownAlerted || state.SlowAlerted
+		next.ConsecutiveProblems = 0
+		if !sendRecovery {
+			next.DownAlerted = false
+			next.SlowAlerted = false
+		}
+		return next, false, false, sendRecovery
+	}
+
+	next.ConsecutiveProblems++
+	if next.ConsecutiveProblems < mon.FailThreshold {
+		return next, false, false, false
+	}
+	sendDown := !check.OK && !state.DownAlerted
+	sendSlow := slowProblem && !state.SlowAlerted
+	return next, sendDown, sendSlow, false
 }
 
 func downMessage(mon models.Monitor, check models.Check) string {

@@ -45,11 +45,19 @@ func main() {
 
 	st := store.New(database)
 	tg := telegram.New(cfg)
-	al := alerter.New(st, tg)
+	al := alerter.New(st, tg, cfg.TelegramSlowAlerts)
 	chk := checker.New()
 	sched := scheduler.New(st, chk, al, cfg.CheckerWorkers, cfg.StatsRetentionDays)
 
+	slog.Info("telegram", "configured", tg.Configured(), "alerts", tg.Enabled(), "slow_alerts", cfg.TelegramSlowAlerts)
+	if tg.Configured() && !tg.Enabled() {
+		slog.Warn("TELEGRAM_ENABLED=false: тестовые сообщения работают, алерты о недоступности и медленном ответе выключены")
+	}
+
 	go sched.Run(ctx)
+	if tg.Configured() {
+		go telegram.RunBot(ctx, tg, st)
+	}
 
 	srv, err := web.New(cfg, st, tg)
 	if err != nil {

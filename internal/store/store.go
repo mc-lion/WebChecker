@@ -290,41 +290,57 @@ func (s *Store) MonitorStats(ctx context.Context, monitorID int64) (models.Monit
 	return stats, nil
 }
 
-func (s *Store) periodStats(ctx context.Context, monitorID int64, window time.Duration) (models.PeriodStats, error) {
-	since := time.Now().UTC().Add(-window)
-	var total, okCount, slowCount int
-	var avg sql.NullFloat64
-	var minMS, maxMS sql.NullInt64
+func (s *Store) LastCheck(ctx context.Context, monitorID int64) (*models.Check, error) {
+	checks, err := s.ListRecentChecks(ctx, monitorID, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(checks) == 0 {
+		return nil, nil
+	}
+	c := checks[0]
+	return &c, nil
+}
 
+func (s *Store) periodStats(ctx context.Context, monitorID int64, window time.Duration) (models.PeriodStats, error) {
+	hours := int(window.Hours())
+	if hours < 1 {
+		hours = 1
+	}
+	var total, okCount, slowCount, avg, minMS, maxMS sql.NullFloat64
 	err := s.db.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*),
-			CAST(COALESCE(SUM(ok), 0) AS UNSIGNED),
-			CAST(COALESCE(SUM(slow), 0) AS UNSIGNED),
+			COALESCE(SUM(ok), 0),
+			COALESCE(SUM(slow), 0),
 			AVG(response_ms),
 			MIN(response_ms),
 			MAX(response_ms)
 		FROM checks
-		WHERE monitor_id = ? AND checked_at >= ?
-	`, monitorID, since).Scan(&total, &okCount, &slowCount, &avg, &minMS, &maxMS)
+		WHERE monitor_id = ? AND checked_at >= UTC_TIMESTAMP(3) - INTERVAL ? HOUR
+	`, monitorID, hours).Scan(&total, &okCount, &slowCount, &avg, &minMS, &maxMS)
 	if err != nil {
 		return models.PeriodStats{}, fmt.Errorf("period stats: %w", err)
 	}
 
-	ps := models.PeriodStats{Total: total, OKCount: okCount, SlowCount: slowCount}
-	if total > 0 {
-		ps.UptimePct = 100.0 * float64(okCount) / float64(total)
+	ps := models.PeriodStats{
+		Total:     int(total.Float64),
+		OKCount:   int(okCount.Float64),
+		SlowCount: int(slowCount.Float64),
+	}
+	if ps.Total > 0 {
+		ps.UptimePct = 100.0 * float64(ps.OKCount) / float64(ps.Total)
 	}
 	if avg.Valid {
 		v := avg.Float64
 		ps.AvgMS = &v
 	}
 	if minMS.Valid {
-		v := int(minMS.Int64)
+		v := int(minMS.Float64)
 		ps.MinMS = &v
 	}
 	if maxMS.Valid {
-		v := int(maxMS.Int64)
+		v := int(maxMS.Float64)
 		ps.MaxMS = &v
 	}
 	return ps, nil
@@ -376,6 +392,299 @@ func (s *Store) DeleteOldChecks(ctx context.Context, olderThan time.Time) (int64
 		return 0, err
 	}
 	return n, nil
+}
+
+func (s *Store) ExportDump(ctx context.Context) (models.Dump, error) {
+	monitors, err := s.listMonitorsByID(ctx)
+	if err != nil {
+		return models.Dump{}, err
+	}
+	checks, err := s.listAllChecks(ctx)
+	if err != nil {
+		return models.Dump{}, err
+	}
+	alerts, err := s.listAlertStates(ctx)
+	if err != nil {
+		return models.Dump{}, err
+	}
+	if monitors == nil {
+		monitors = []models.Monitor{}
+	}
+	if checks == nil {
+		checks = []models.Check{}
+	}
+	if alerts == nil {
+		alerts = []models.AlertState{}
+	}
+	return models.Dump{
+		Version:     models.DumpVersion,
+		ExportedAt:  time.Now().UTC(),
+		Monitors:    monitors,
+		Checks:      checks,
+		AlertStates: alerts,
+	}, nil
+}
+
+func (s *Store) ImportDump(ctx context.Context, dump models.Dump) error {
+	if dump.Version != 0 && dump.Version != models.DumpVersion {
+		return fmt.Errorf("неподдерживаемая версия дампа: %d", dump.Version)
+	}
+	monitorIDs := make(map[int64]struct{}, len(dump.Monitors))
+	for _, m := range dump.Monitors {
+		if strings.TrimSpace(m.Name) == "" || strings.TrimSpace(m.URL) == "" {
+			return fmt.Errorf("у каждого монитора должны быть имя и URL")
+		}
+		if m.ID > 0 {
+			if _, ok := monitorIDs[m.ID]; ok {
+				return fmt.Errorf("повторяющийся id монитора: %d", m.ID)
+			}
+			monitorIDs[m.ID] = struct{}{}
+		}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin import: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM checks`); err != nil {
+		return fmt.Errorf("clear checks: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM alert_states`); err != nil {
+		return fmt.Errorf("clear alert states: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM monitors`); err != nil {
+		return fmt.Errorf("clear monitors: %w", err)
+	}
+
+	idMap := make(map[int64]int64, len(dump.Monitors))
+	var maxMonitorID int64
+	for _, m := range dump.Monitors {
+		newID, err := insertMonitorTx(ctx, tx, m)
+		if err != nil {
+			return err
+		}
+		if m.ID > 0 {
+			idMap[m.ID] = newID
+		}
+		if newID > maxMonitorID {
+			maxMonitorID = newID
+		}
+		monitorIDs[newID] = struct{}{}
+	}
+
+	var maxCheckID int64
+	for _, c := range dump.Checks {
+		monitorID := c.MonitorID
+		if mapped, ok := idMap[c.MonitorID]; ok {
+			monitorID = mapped
+		}
+		if _, ok := monitorIDs[monitorID]; !ok {
+			return fmt.Errorf("проверка ссылается на неизвестный monitor_id %d", c.MonitorID)
+		}
+		c.MonitorID = monitorID
+		if err := insertCheckTx(ctx, tx, c); err != nil {
+			return err
+		}
+		if c.ID > maxCheckID {
+			maxCheckID = c.ID
+		}
+	}
+
+	for _, state := range dump.AlertStates {
+		monitorID := state.MonitorID
+		if mapped, ok := idMap[state.MonitorID]; ok {
+			monitorID = mapped
+		}
+		if _, ok := monitorIDs[monitorID]; !ok {
+			return fmt.Errorf("состояние алерта ссылается на неизвестный monitor_id %d", state.MonitorID)
+		}
+		state.MonitorID = monitorID
+		if err := insertAlertStateTx(ctx, tx, state); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit import: %w", err)
+	}
+	_ = resetAutoIncrement(ctx, s.db, "monitors", maxMonitorID)
+	_ = resetAutoIncrement(ctx, s.db, "checks", maxCheckID)
+	return nil
+}
+
+func (s *Store) listMonitorsByID(ctx context.Context) ([]models.Monitor, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, url, interval_seconds, expected_status, timeout_seconds,
+		       slow_threshold_ms, fail_threshold, enabled, created_at, updated_at
+		FROM monitors
+		ORDER BY id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list monitors by id: %w", err)
+	}
+	defer rows.Close()
+
+	var out []models.Monitor
+	for rows.Next() {
+		m, err := scanMonitor(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) listAllChecks(ctx context.Context) ([]models.Check, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, monitor_id, checked_at, status_code, response_ms, ok, slow, error_text
+		FROM checks
+		ORDER BY id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list all checks: %w", err)
+	}
+	defer rows.Close()
+
+	var out []models.Check
+	for rows.Next() {
+		c, err := scanCheck(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) listAlertStates(ctx context.Context) ([]models.AlertState, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT monitor_id, consecutive_problems, down_alerted, slow_alerted, updated_at
+		FROM alert_states
+		ORDER BY monitor_id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list alert states: %w", err)
+	}
+	defer rows.Close()
+
+	var out []models.AlertState
+	for rows.Next() {
+		var state models.AlertState
+		var down, slow int
+		if err := rows.Scan(&state.MonitorID, &state.ConsecutiveProblems, &down, &slow, &state.UpdatedAt); err != nil {
+			return nil, err
+		}
+		state.DownAlerted = down == 1
+		state.SlowAlerted = slow == 1
+		out = append(out, state)
+	}
+	return out, rows.Err()
+}
+
+func insertMonitorTx(ctx context.Context, tx *sql.Tx, m models.Monitor) (int64, error) {
+	if m.IntervalSeconds < 1 {
+		m.IntervalSeconds = 60
+	}
+	if m.ExpectedStatus < 1 {
+		m.ExpectedStatus = 200
+	}
+	if m.TimeoutSeconds < 1 {
+		m.TimeoutSeconds = 10
+	}
+	if m.SlowThresholdMS < 1 {
+		m.SlowThresholdMS = 3000
+	}
+	if m.FailThreshold < 1 {
+		m.FailThreshold = 3
+	}
+	created, updated := m.CreatedAt.UTC(), m.UpdatedAt.UTC()
+	if created.IsZero() {
+		created = time.Now().UTC()
+	}
+	if updated.IsZero() {
+		updated = created
+	}
+
+	if m.ID > 0 {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO monitors (id, name, url, interval_seconds, expected_status, timeout_seconds,
+			                      slow_threshold_ms, fail_threshold, enabled, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, m.ID, m.Name, m.URL, m.IntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), created, updated)
+		if err != nil {
+			return 0, fmt.Errorf("import monitor %d: %w", m.ID, err)
+		}
+		return m.ID, nil
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO monitors (name, url, interval_seconds, expected_status, timeout_seconds,
+		                      slow_threshold_ms, fail_threshold, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, m.Name, m.URL, m.IntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), created, updated)
+	if err != nil {
+		return 0, fmt.Errorf("import monitor: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func insertCheckTx(ctx context.Context, tx *sql.Tx, c models.Check) error {
+	checked := c.CheckedAt.UTC()
+	if checked.IsZero() {
+		checked = time.Now().UTC()
+	}
+	if c.ID > 0 {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO checks (id, monitor_id, checked_at, status_code, response_ms, ok, slow, error_text)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, c.ID, c.MonitorID, checked, c.StatusCode, c.ResponseMS, boolToInt(c.OK), boolToInt(c.Slow), nullIfEmpty(c.ErrorText))
+		if err != nil {
+			return fmt.Errorf("import check %d: %w", c.ID, err)
+		}
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO checks (monitor_id, checked_at, status_code, response_ms, ok, slow, error_text)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, c.MonitorID, checked, c.StatusCode, c.ResponseMS, boolToInt(c.OK), boolToInt(c.Slow), nullIfEmpty(c.ErrorText))
+	if err != nil {
+		return fmt.Errorf("import check: %w", err)
+	}
+	return nil
+}
+
+func insertAlertStateTx(ctx context.Context, tx *sql.Tx, state models.AlertState) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO alert_states (monitor_id, consecutive_problems, down_alerted, slow_alerted)
+		VALUES (?, ?, ?, ?)
+	`, state.MonitorID, state.ConsecutiveProblems, boolToInt(state.DownAlerted), boolToInt(state.SlowAlerted))
+	if err != nil {
+		return fmt.Errorf("import alert state %d: %w", state.MonitorID, err)
+	}
+	return nil
+}
+
+func resetAutoIncrement(ctx context.Context, exec interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}, table string, maxID int64) error {
+	if table != "monitors" && table != "checks" {
+		return fmt.Errorf("unknown table %s", table)
+	}
+	if maxID < 1 {
+		maxID = 1
+	}
+	query := fmt.Sprintf("ALTER TABLE %s AUTO_INCREMENT = %d", table, maxID+1)
+	if _, err := exec.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("reset auto_increment %s: %w", table, err)
+	}
+	return nil
 }
 
 func (s *Store) getAlertState(ctx context.Context, monitorID int64) (models.AlertState, error) {
