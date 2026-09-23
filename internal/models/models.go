@@ -3,17 +3,18 @@ package models
 import "time"
 
 type Monitor struct {
-	ID              int64     `json:"id"`
-	Name            string    `json:"name"`
-	URL             string    `json:"url"`
-	IntervalSeconds int       `json:"interval_seconds"`
-	ExpectedStatus  int       `json:"expected_status"`
-	TimeoutSeconds  int       `json:"timeout_seconds"`
-	SlowThresholdMS int       `json:"slow_threshold_ms"`
-	FailThreshold   int       `json:"fail_threshold"`
-	Enabled         bool      `json:"enabled"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID                   int64     `json:"id"`
+	Name                 string    `json:"name"`
+	URL                  string    `json:"url"`
+	IntervalSeconds      int       `json:"interval_seconds"`
+	RetryIntervalSeconds int       `json:"retry_interval_seconds"`
+	ExpectedStatus       int       `json:"expected_status"`
+	TimeoutSeconds       int       `json:"timeout_seconds"`
+	SlowThresholdMS      int       `json:"slow_threshold_ms"`
+	FailThreshold        int       `json:"fail_threshold"`
+	Enabled              bool      `json:"enabled"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 type Check struct {

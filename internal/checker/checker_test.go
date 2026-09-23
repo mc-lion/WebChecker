@@ -4,11 +4,40 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"webchecker/internal/models"
 )
+
+func TestCheckBlocksPrivateHosts(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+
+	mon := models.Monitor{
+		ID:              1,
+		URL:             ts.URL, // httptest всегда слушает на 127.0.0.1
+		ExpectedStatus:  200,
+		TimeoutSeconds:  2,
+		SlowThresholdMS: 5000,
+	}
+
+	blocked := NewWithOptions(true).Check(context.Background(), mon)
+	if blocked.OK {
+		t.Fatal("private address must be rejected when blocking is on")
+	}
+	if !strings.Contains(blocked.ErrorText, "внутренней сети") {
+		t.Fatalf("unexpected error text: %q", blocked.ErrorText)
+	}
+
+	allowed := NewWithOptions(false).Check(context.Background(), mon)
+	if !allowed.OK {
+		t.Fatalf("private address must work by default, got %+v", allowed)
+	}
+}
 
 func TestCheckExpectedStatus(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -91,7 +91,9 @@ func evaluate(state models.AlertState, mon models.Monitor, check models.Check, s
 		return next, false, false, false
 	}
 	sendDown := !check.OK && !state.DownAlerted
-	sendSlow := slowProblem && !state.SlowAlerted
+	// При таймауте проверка одновременно !OK и Slow. Про такой инцидент нужно
+	// одно сообщение «недоступен», а не два про один и тот же таймаут.
+	sendSlow := slowProblem && check.OK && !state.SlowAlerted
 	return next, sendDown, sendSlow, false
 }
 

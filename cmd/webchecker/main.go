@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -46,7 +47,7 @@ func main() {
 	st := store.New(database)
 	tg := telegram.New(cfg)
 	al := alerter.New(st, tg, cfg.TelegramSlowAlerts)
-	chk := checker.New()
+	chk := checker.NewWithOptions(cfg.BlockPrivateHosts)
 	sched := scheduler.New(st, chk, al, cfg.CheckerWorkers, cfg.StatsRetentionDays)
 
 	slog.Info("telegram", "configured", tg.Configured(), "alerts", tg.Enabled(), "slow_alerts", cfg.TelegramSlowAlerts)
@@ -54,12 +55,21 @@ func main() {
 		slog.Warn("TELEGRAM_ENABLED=false: тестовые сообщения работают, алерты о недоступности и медленном ответе выключены")
 	}
 
-	go sched.Run(ctx)
+	var background sync.WaitGroup
+	background.Add(1)
+	go func() {
+		defer background.Done()
+		sched.Run(ctx)
+	}()
 	if tg.Configured() {
-		go telegram.RunBot(ctx, tg, st)
+		background.Add(1)
+		go func() {
+			defer background.Done()
+			telegram.RunBot(ctx, tg, st)
+		}()
 	}
 
-	srv, err := web.New(cfg, st, tg)
+	srv, err := web.New(cfg, st, tg, sched)
 	if err != nil {
 		slog.Error("web", "error", err)
 		os.Exit(1)
@@ -69,6 +79,12 @@ func main() {
 		Addr:              cfg.HTTPAddr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
+		// Импорт дампа может занять минуты, а экспорт — отдавать сотни
+		// мегабайт, поэтому таймауты щедрые: они нужны против зависших
+		// соединений, а не для ограничения нормальной работы.
+		ReadTimeout:  30 * time.Minute,
+		WriteTimeout: 30 * time.Minute,
+		IdleTimeout:  2 * time.Minute,
 	}
 
 	go func() {
@@ -84,4 +100,18 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+
+	// Даём планировщику и боту закончить: иначе процесс уходит, пока воркеры
+	// ещё дописывают результаты проверок.
+	done := make(chan struct{})
+	go func() {
+		background.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		slog.Warn("background workers did not stop in time")
+	}
+	slog.Info("stopped")
 }

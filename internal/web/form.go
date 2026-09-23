@@ -12,6 +12,7 @@ import (
 const (
 	minIntervalSeconds = 10
 	maxIntervalSeconds = 86400
+	minRetrySeconds    = 1
 	minTimeoutSeconds  = 1
 	maxTimeoutSeconds  = 120
 	minSlowMS          = 1
@@ -24,12 +25,13 @@ const (
 
 func defaultMonitor() models.Monitor {
 	return models.Monitor{
-		IntervalSeconds: 60,
-		ExpectedStatus:  200,
-		TimeoutSeconds:  10,
-		SlowThresholdMS: 3000,
-		FailThreshold:   3,
-		Enabled:         true,
+		IntervalSeconds:      60,
+		RetryIntervalSeconds: 10,
+		ExpectedStatus:       200,
+		TimeoutSeconds:       10,
+		SlowThresholdMS:      3000,
+		FailThreshold:        3,
+		Enabled:              true,
 	}
 }
 
@@ -41,6 +43,10 @@ func monitorFromForm(values url.Values, existing models.Monitor) (models.Monitor
 
 	var err error
 	m.IntervalSeconds, err = parseIntField(values.Get("interval_seconds"), "интервал")
+	if err != nil {
+		return m, err
+	}
+	m.RetryIntervalSeconds, err = parseIntField(values.Get("retry_interval_seconds"), "интервал при ошибке")
 	if err != nil {
 		return m, err
 	}
@@ -79,6 +85,9 @@ func monitorFromForm(values url.Values, existing models.Monitor) (models.Monitor
 	}
 	if m.IntervalSeconds < minIntervalSeconds || m.IntervalSeconds > maxIntervalSeconds {
 		return m, fmt.Errorf("интервал должен быть от %d до %d секунд", minIntervalSeconds, maxIntervalSeconds)
+	}
+	if m.RetryIntervalSeconds < minRetrySeconds || m.RetryIntervalSeconds > m.IntervalSeconds {
+		return m, fmt.Errorf("интервал при ошибке должен быть от %d до %d секунд", minRetrySeconds, m.IntervalSeconds)
 	}
 	if m.ExpectedStatus < 100 || m.ExpectedStatus > 599 {
 		return m, fmt.Errorf("ожидаемый статус должен быть от 100 до 599")

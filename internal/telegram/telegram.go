@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"webchecker/internal/config"
 )
 
+// Telegram ограничивает сообщение 4096 символами (не байтами).
 const maxMessageLen = 4000
 
 type Client struct {
@@ -215,42 +217,56 @@ func (c *Client) apiPost(ctx context.Context, method string, payload map[string]
 	return nil
 }
 
+// splitMessage режет текст по рунам: лимит Telegram задан в символах, а резать
+// по байтам нельзя — кириллица развалится на половинки символов.
 func splitMessage(text string, limit int) []string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil
 	}
-	if len(text) <= limit {
+	if limit < 1 {
+		limit = 1
+	}
+	if utf8.RuneCountInString(text) <= limit {
 		return []string{text}
 	}
+
 	var parts []string
 	var b strings.Builder
-	for _, line := range strings.Split(text, "\n") {
-		if b.Len() > 0 && b.Len()+1+len(line) > limit {
-			parts = append(parts, strings.TrimSpace(b.String()))
-			b.Reset()
+	pending := 0
+	flush := func() {
+		if leftover := strings.TrimSpace(b.String()); leftover != "" {
+			parts = append(parts, leftover)
 		}
-		if len(line) > limit {
-			if b.Len() > 0 {
-				parts = append(parts, strings.TrimSpace(b.String()))
-				b.Reset()
+		b.Reset()
+		pending = 0
+	}
+
+	for _, line := range strings.Split(text, "\n") {
+		lineLen := utf8.RuneCountInString(line)
+		if pending > 0 && pending+1+lineLen > limit {
+			flush()
+		}
+		if lineLen > limit {
+			flush()
+			runes := []rune(line)
+			for len(runes) > limit {
+				parts = append(parts, string(runes[:limit]))
+				runes = runes[limit:]
 			}
-			for len(line) > limit {
-				parts = append(parts, line[:limit])
-				line = line[limit:]
-			}
-			if line != "" {
-				b.WriteString(line)
+			if len(runes) > 0 {
+				b.WriteString(string(runes))
+				pending = len(runes)
 			}
 			continue
 		}
-		if b.Len() > 0 {
+		if pending > 0 {
 			b.WriteByte('\n')
+			pending++
 		}
 		b.WriteString(line)
+		pending += lineLen
 	}
-	if leftover := strings.TrimSpace(b.String()); leftover != "" {
-		parts = append(parts, leftover)
-	}
+	flush()
 	return parts
 }

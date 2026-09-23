@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -12,6 +13,11 @@ import (
 	"webchecker/internal/store"
 )
 
+type runState struct {
+	lastRun time.Time
+	lastOK  bool
+}
+
 type Scheduler struct {
 	store     *store.Store
 	checker   *checker.Checker
@@ -20,8 +26,9 @@ type Scheduler struct {
 	retention time.Duration
 
 	mu       sync.Mutex
-	lastRun  map[int64]time.Time
+	state    map[int64]runState
 	inFlight map[int64]struct{}
+	paused   bool
 }
 
 func New(st *store.Store, chk *checker.Checker, al *alerter.Alerter, workers int, retentionDays int) *Scheduler {
@@ -34,7 +41,7 @@ func New(st *store.Store, chk *checker.Checker, al *alerter.Alerter, workers int
 		alerter:   al,
 		workers:   workers,
 		retention: time.Duration(retentionDays) * 24 * time.Hour,
-		lastRun:   make(map[int64]time.Time),
+		state:     make(map[int64]runState),
 		inFlight:  make(map[int64]struct{}),
 	}
 }
@@ -66,8 +73,14 @@ func (s *Scheduler) Run(ctx context.Context) {
 			wg.Wait()
 			return
 		case <-retentionTicker.C:
+			if s.isPaused() {
+				continue
+			}
 			s.cleanup(ctx)
 		case <-ticker.C:
+			if s.isPaused() {
+				continue
+			}
 			monitors, err := s.store.ListEnabledMonitors(ctx)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -86,29 +99,89 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
+func (s *Scheduler) isPaused() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.paused
+}
+
+// Pause прекращает постановку новых проверок и ждёт, пока завершатся уже
+// запущенные. Нужен для импорта дампа: он удаляет monitors и checks целиком, а
+// параллельный INSERT воркера упирается в блокировку или внешний ключ.
+func (s *Scheduler) Pause(ctx context.Context) (func(), error) {
+	s.mu.Lock()
+	if s.paused {
+		s.mu.Unlock()
+		return nil, errors.New("планировщик уже приостановлен")
+	}
+	s.paused = true
+	s.mu.Unlock()
+
+	resume := func() {
+		s.mu.Lock()
+		s.paused = false
+		// Данные могли полностью замениться, поэтому фазы пересеиваются из БД.
+		s.state = make(map[int64]runState)
+		s.mu.Unlock()
+		slog.Info("scheduler resumed")
+	}
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		s.mu.Lock()
+		running := len(s.inFlight)
+		s.mu.Unlock()
+		if running == 0 {
+			slog.Info("scheduler paused")
+			return resume, nil
+		}
+		select {
+		case <-ctx.Done():
+			resume()
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 func (s *Scheduler) seedLastRuns(ctx context.Context, monitors []models.Monitor, now time.Time) {
 	var missing []models.Monitor
 	s.mu.Lock()
 	for _, mon := range monitors {
-		if _, ok := s.lastRun[mon.ID]; !ok {
+		if _, ok := s.state[mon.ID]; !ok {
 			missing = append(missing, mon)
 		}
 	}
 	s.mu.Unlock()
+	if len(missing) == 0 {
+		return
+	}
+
+	// Один запрос на всех: при старте с сотней мониторов поштучный LastCheck
+	// давал сотню обращений к БД.
+	ids := make([]int64, 0, len(missing))
+	for _, mon := range missing {
+		ids = append(ids, mon.ID)
+	}
+	lastChecks, err := s.store.LastChecks(ctx, ids)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		slog.Error("scheduler last checks failed", "error", err)
+		lastChecks = nil
+	}
 
 	for _, mon := range missing {
-		last, err := s.store.LastCheck(ctx, mon.ID)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			slog.Error("scheduler last check failed", "monitor_id", mon.ID, "error", err)
-			last = nil
+		last := lastChecks[mon.ID]
+		seeded := runState{
+			lastRun: initialLastRun(now, mon, last),
+			lastOK:  last == nil || last.OK,
 		}
-		seeded := initialLastRun(now, mon, last)
 		s.mu.Lock()
-		if _, exists := s.lastRun[mon.ID]; !exists {
-			s.lastRun[mon.ID] = seeded
+		if _, exists := s.state[mon.ID]; !exists {
+			s.state[mon.ID] = seeded
 		}
 		s.mu.Unlock()
 	}
@@ -118,44 +191,77 @@ func (s *Scheduler) enqueueDue(monitors []models.Monitor, now time.Time, jobs ch
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.paused {
+		return
+	}
+
 	active := make(map[int64]struct{}, len(monitors))
 	for _, mon := range monitors {
 		active[mon.ID] = struct{}{}
 		if _, busy := s.inFlight[mon.ID]; busy {
 			continue
 		}
-		last, ok := s.lastRun[mon.ID]
-		interval := monitorInterval(mon)
-		if ok && now.Sub(last) < interval {
+		st, ok := s.state[mon.ID]
+		wait := waitDuration(mon, !ok || st.lastOK)
+		if ok && now.Sub(st.lastRun) < wait {
 			continue
 		}
 		s.inFlight[mon.ID] = struct{}{}
-		s.lastRun[mon.ID] = now
+		prevRun := st.lastRun
+		st.lastRun = now
+		s.state[mon.ID] = st
 		select {
 		case jobs <- mon:
 		default:
 			delete(s.inFlight, mon.ID)
-			delete(s.lastRun, mon.ID)
+			st.lastRun = prevRun
+			s.state[mon.ID] = st
 		}
 	}
-	for id := range s.lastRun {
+	for id := range s.state {
 		if _, ok := active[id]; !ok {
-			delete(s.lastRun, id)
+			delete(s.state, id)
 		}
 	}
 }
 
 func initialLastRun(now time.Time, mon models.Monitor, last *models.Check) time.Time {
-	interval := monitorInterval(mon)
-	if last != nil && !last.CheckedAt.IsZero() && now.Sub(last.CheckedAt) < interval {
+	if last == nil || last.CheckedAt.IsZero() {
+		return hashPhase(now, mon.ID, monitorInterval(mon))
+	}
+	wait := waitDuration(mon, last.OK)
+	if now.Sub(last.CheckedAt) < wait {
 		return last.CheckedAt
 	}
+	return hashPhase(now, mon.ID, wait)
+}
+
+func waitDuration(mon models.Monitor, lastOK bool) time.Duration {
+	if !lastOK {
+		return retryInterval(mon)
+	}
+	return monitorInterval(mon)
+}
+
+func hashPhase(now time.Time, id int64, interval time.Duration) time.Time {
 	sec := int64(interval / time.Second)
 	if sec < 1 {
 		sec = 1
 	}
-	offset := time.Duration(mon.ID%sec) * time.Second
+	offset := time.Duration(id%sec) * time.Second
 	return now.Add(-interval + offset)
+}
+
+func retryInterval(mon models.Monitor) time.Duration {
+	d := time.Duration(mon.RetryIntervalSeconds) * time.Second
+	if d < time.Second {
+		d = time.Second
+	}
+	limit := monitorInterval(mon)
+	if d > limit {
+		return limit
+	}
+	return d
 }
 
 func monitorInterval(mon models.Monitor) time.Duration {
@@ -174,6 +280,12 @@ func (s *Scheduler) runCheck(ctx context.Context, mon models.Monitor) {
 	}()
 
 	result := s.checker.Check(ctx, mon)
+	s.mu.Lock()
+	if st, ok := s.state[mon.ID]; ok {
+		st.lastOK = result.OK
+		s.state[mon.ID] = st
+	}
+	s.mu.Unlock()
 	if !result.OK || result.Slow {
 		status := 0
 		if result.StatusCode != nil {

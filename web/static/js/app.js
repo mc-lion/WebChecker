@@ -8,6 +8,30 @@
     });
   });
 
+  // Интервал при ошибке не может превышать основной интервал: держим max
+  // синхронно с ним, чтобы браузер ловил ошибку до отправки формы.
+  document.querySelectorAll("input[data-max-from]").forEach((input) => {
+    const source = document.querySelector(
+      `input[name="${input.getAttribute("data-max-from")}"]`
+    );
+    if (!source) {
+      return;
+    }
+    const sync = () => {
+      const limit = parseInt(source.value, 10);
+      if (!Number.isFinite(limit) || limit < 1) {
+        return;
+      }
+      input.max = String(limit);
+      if (parseInt(input.value, 10) > limit) {
+        input.value = String(limit);
+      }
+    };
+    source.addEventListener("input", sync);
+    source.addEventListener("change", sync);
+    sync();
+  });
+
   const canvas = document.getElementById("latency-chart");
   if (!canvas) {
     return;

@@ -1,10 +1,13 @@
 package store
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -27,7 +30,7 @@ func (s *Store) Ping(ctx context.Context) error {
 
 func (s *Store) ListMonitors(ctx context.Context) ([]models.Monitor, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, url, interval_seconds, expected_status, timeout_seconds,
+		SELECT id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
 		       slow_threshold_ms, fail_threshold, enabled, created_at, updated_at
 		FROM monitors
 		ORDER BY name
@@ -50,7 +53,7 @@ func (s *Store) ListMonitors(ctx context.Context) ([]models.Monitor, error) {
 
 func (s *Store) ListEnabledMonitors(ctx context.Context) ([]models.Monitor, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, url, interval_seconds, expected_status, timeout_seconds,
+		SELECT id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
 		       slow_threshold_ms, fail_threshold, enabled, created_at, updated_at
 		FROM monitors
 		WHERE enabled = 1
@@ -74,7 +77,7 @@ func (s *Store) ListEnabledMonitors(ctx context.Context) ([]models.Monitor, erro
 
 func (s *Store) GetMonitor(ctx context.Context, id int64) (models.Monitor, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, name, url, interval_seconds, expected_status, timeout_seconds,
+		SELECT id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
 		       slow_threshold_ms, fail_threshold, enabled, created_at, updated_at
 		FROM monitors
 		WHERE id = ?
@@ -91,10 +94,10 @@ func (s *Store) GetMonitor(ctx context.Context, id int64) (models.Monitor, error
 
 func (s *Store) CreateMonitor(ctx context.Context, m models.Monitor) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO monitors (name, url, interval_seconds, expected_status, timeout_seconds,
+		INSERT INTO monitors (name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
 		                      slow_threshold_ms, fail_threshold, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, m.Name, m.URL, m.IntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled))
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled))
 	if err != nil {
 		return 0, fmt.Errorf("create monitor: %w", err)
 	}
@@ -108,12 +111,42 @@ func (s *Store) CreateMonitor(ctx context.Context, m models.Monitor) (int64, err
 func (s *Store) UpdateMonitor(ctx context.Context, m models.Monitor) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE monitors
-		SET name = ?, url = ?, interval_seconds = ?, expected_status = ?, timeout_seconds = ?,
+		SET name = ?, url = ?, interval_seconds = ?, retry_interval_seconds = ?, expected_status = ?, timeout_seconds = ?,
 		    slow_threshold_ms = ?, fail_threshold = ?, enabled = ?
 		WHERE id = ?
-	`, m.Name, m.URL, m.IntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), m.ID)
+	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), m.ID)
 	if err != nil {
 		return fmt.Errorf("update monitor: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	// MySQL reports 0 when SET values are identical to the current row.
+	return s.requireMonitor(ctx, m.ID)
+}
+
+func (s *Store) requireMonitor(ctx context.Context, id int64) error {
+	var one int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM monitors WHERE id = ?`, id).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("get monitor: %w", err)
+	}
+	return nil
+}
+
+// ToggleMonitorEnabled переключает флаг одним запросом, без чтения текущего
+// состояния: read-then-write мог разъехаться при двух кликах подряд.
+func (s *Store) ToggleMonitorEnabled(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE monitors SET enabled = 1 - enabled WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("toggle monitor: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -128,7 +161,7 @@ func (s *Store) UpdateMonitor(ctx context.Context, m models.Monitor) error {
 func (s *Store) SetMonitorEnabled(ctx context.Context, id int64, enabled bool) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE monitors SET enabled = ? WHERE id = ?`, boolToInt(enabled), id)
 	if err != nil {
-		return fmt.Errorf("toggle monitor: %w", err)
+		return fmt.Errorf("set monitor enabled: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -196,7 +229,7 @@ func (s *Store) ListRecentChecks(ctx context.Context, monitorID int64, limit int
 func (s *Store) Dashboard(ctx context.Context) ([]models.DashboardRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
-			m.id, m.name, m.url, m.interval_seconds, m.expected_status, m.timeout_seconds,
+			m.id, m.name, m.url, m.interval_seconds, m.retry_interval_seconds, m.expected_status, m.timeout_seconds,
 			m.slow_threshold_ms, m.fail_threshold, m.enabled, m.created_at, m.updated_at,
 			c.status_code, c.response_ms, c.ok, c.slow, c.error_text, c.checked_at,
 			s.uptime_24h
@@ -236,7 +269,7 @@ func (s *Store) Dashboard(ctx context.Context) ([]models.DashboardRow, error) {
 		var uptime sql.NullFloat64
 
 		err := rows.Scan(
-			&row.ID, &row.Name, &row.URL, &row.IntervalSeconds, &row.ExpectedStatus, &row.TimeoutSeconds,
+			&row.ID, &row.Name, &row.URL, &row.IntervalSeconds, &row.RetryIntervalSeconds, &row.ExpectedStatus, &row.TimeoutSeconds,
 			&row.SlowThresholdMS, &row.FailThreshold, &enabled, &row.CreatedAt, &row.UpdatedAt,
 			&lastStatus, &lastMS, &lastOK, &lastSlow, &lastErr, &lastAt, &uptime,
 		)
@@ -300,6 +333,48 @@ func (s *Store) LastCheck(ctx context.Context, monitorID int64) (*models.Check, 
 	}
 	c := checks[0]
 	return &c, nil
+}
+
+// LastChecks возвращает последнюю проверку для каждого из monitorIDs одним
+// запросом. Мониторы без истории в карте отсутствуют.
+func (s *Store) LastChecks(ctx context.Context, monitorIDs []int64) (map[int64]*models.Check, error) {
+	out := make(map[int64]*models.Check, len(monitorIDs))
+	if len(monitorIDs) == 0 {
+		return out, nil
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(monitorIDs)), ",")
+	args := make([]any, 0, len(monitorIDs)*2)
+	for _, id := range monitorIDs {
+		args = append(args, id)
+	}
+	args = append(args, args[:len(monitorIDs)]...)
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT c.id, c.monitor_id, c.checked_at, c.status_code, c.response_ms, c.ok, c.slow, c.error_text
+		FROM checks c
+		INNER JOIN (
+			SELECT monitor_id, MAX(id) AS max_id
+			FROM checks
+			WHERE monitor_id IN (`+placeholders+`)
+			GROUP BY monitor_id
+		) last ON last.max_id = c.id
+		WHERE c.monitor_id IN (`+placeholders+`)
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("last checks: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		c, err := scanCheck(rows)
+		if err != nil {
+			return nil, err
+		}
+		last := c
+		out[c.MonitorID] = &last
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) periodStats(ctx context.Context, monitorID int64, window time.Duration) (models.PeriodStats, error) {
@@ -382,64 +457,156 @@ func (s *Store) SaveAlertState(ctx context.Context, state models.AlertState) err
 	return nil
 }
 
+const deleteChecksBatch = 5000
+
+// DeleteOldChecks удаляет историю батчами: одиночный DELETE на миллионах строк
+// держит долгую блокировку и раздувает undo log.
 func (s *Store) DeleteOldChecks(ctx context.Context, olderThan time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM checks WHERE checked_at < ?`, olderThan)
-	if err != nil {
-		return 0, fmt.Errorf("delete old checks: %w", err)
+	var total int64
+	for {
+		res, err := s.db.ExecContext(ctx,
+			`DELETE FROM checks WHERE checked_at < ? LIMIT ?`, olderThan, deleteChecksBatch)
+		if err != nil {
+			return total, fmt.Errorf("delete old checks: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n < deleteChecksBatch {
+			return total, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, err
-	}
-	return n, nil
 }
 
-func (s *Store) ExportDump(ctx context.Context) (models.Dump, error) {
-	monitors, err := s.listMonitorsByID(ctx)
-	if err != nil {
-		return models.Dump{}, err
+// StreamDump пишет дамп прямо в w, не собирая историю в памяти: при 30 днях
+// хранения таблица checks — это миллионы строк.
+func (s *Store) StreamDump(ctx context.Context, w io.Writer, includeChecks bool) error {
+	bw := bufio.NewWriterSize(w, 64<<10)
+	enc := json.NewEncoder(bw)
+
+	writeRaw := func(s string) {
+		_, _ = bw.WriteString(s)
 	}
-	checks, err := s.listAllChecks(ctx)
-	if err != nil {
-		return models.Dump{}, err
+
+	writeRaw(`{"version":`)
+	if err := enc.Encode(models.DumpVersion); err != nil {
+		return err
 	}
-	alerts, err := s.listAlertStates(ctx)
-	if err != nil {
-		return models.Dump{}, err
+	writeRaw(`,"exported_at":`)
+	if err := enc.Encode(time.Now().UTC()); err != nil {
+		return err
 	}
-	if monitors == nil {
-		monitors = []models.Monitor{}
+
+	writeRaw(`,"monitors":[`)
+	if err := s.streamMonitors(ctx, bw, enc); err != nil {
+		return err
 	}
-	if checks == nil {
-		checks = []models.Check{}
+
+	writeRaw(`],"checks":[`)
+	if includeChecks {
+		if err := s.streamChecks(ctx, bw, enc); err != nil {
+			return err
+		}
 	}
-	if alerts == nil {
-		alerts = []models.AlertState{}
+
+	writeRaw(`],"alert_states":[`)
+	if err := s.streamAlertStates(ctx, bw, enc); err != nil {
+		return err
 	}
-	return models.Dump{
-		Version:     models.DumpVersion,
-		ExportedAt:  time.Now().UTC(),
-		Monitors:    monitors,
-		Checks:      checks,
-		AlertStates: alerts,
-	}, nil
+	writeRaw("]}\n")
+
+	return bw.Flush()
 }
 
-func (s *Store) ImportDump(ctx context.Context, dump models.Dump) error {
-	if dump.Version != 0 && dump.Version != models.DumpVersion {
-		return fmt.Errorf("неподдерживаемая версия дампа: %d", dump.Version)
+func (s *Store) streamMonitors(ctx context.Context, bw *bufio.Writer, enc *json.Encoder) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
+		       slow_threshold_ms, fail_threshold, enabled, created_at, updated_at
+		FROM monitors
+		ORDER BY id
+	`)
+	if err != nil {
+		return fmt.Errorf("export monitors: %w", err)
 	}
-	monitorIDs := make(map[int64]struct{}, len(dump.Monitors))
-	for _, m := range dump.Monitors {
-		if strings.TrimSpace(m.Name) == "" || strings.TrimSpace(m.URL) == "" {
-			return fmt.Errorf("у каждого монитора должны быть имя и URL")
+	defer rows.Close()
+
+	first := true
+	for rows.Next() {
+		m, err := scanMonitor(rows)
+		if err != nil {
+			return err
 		}
-		if m.ID > 0 {
-			if _, ok := monitorIDs[m.ID]; ok {
-				return fmt.Errorf("повторяющийся id монитора: %d", m.ID)
-			}
-			monitorIDs[m.ID] = struct{}{}
+		if !first {
+			_, _ = bw.WriteString(",")
 		}
+		first = false
+		if err := enc.Encode(m); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+func (s *Store) streamChecks(ctx context.Context, bw *bufio.Writer, enc *json.Encoder) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, monitor_id, checked_at, status_code, response_ms, ok, slow, error_text
+		FROM checks
+		ORDER BY id
+	`)
+	if err != nil {
+		return fmt.Errorf("export checks: %w", err)
+	}
+	defer rows.Close()
+
+	first := true
+	for rows.Next() {
+		c, err := scanCheck(rows)
+		if err != nil {
+			return err
+		}
+		if !first {
+			_, _ = bw.WriteString(",")
+		}
+		first = false
+		if err := enc.Encode(c); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+func (s *Store) streamAlertStates(ctx context.Context, bw *bufio.Writer, enc *json.Encoder) error {
+	states, err := s.listAlertStates(ctx)
+	if err != nil {
+		return err
+	}
+	for i, state := range states {
+		if i > 0 {
+			_, _ = bw.WriteString(",")
+		}
+		if err := enc.Encode(state); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ImportStream читает дамп потоково, элемент за элементом: файл с историей
+// может быть в сотни мегабайт, и держать его в памяти целиком нельзя.
+// Нужен ReadSeeker, потому что мониторы должны попасть в БД раньше проверок,
+// а порядок ключей в чужом JSON не гарантирован.
+func (s *Store) ImportStream(ctx context.Context, src io.ReadSeeker) error {
+	version, err := readDumpVersion(src)
+	if err != nil {
+		return err
+	}
+	if version != 0 && version != models.DumpVersion {
+		return fmt.Errorf("неподдерживаемая версия дампа: %d", version)
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -458,52 +625,103 @@ func (s *Store) ImportDump(ctx context.Context, dump models.Dump) error {
 		return fmt.Errorf("clear monitors: %w", err)
 	}
 
-	idMap := make(map[int64]int64, len(dump.Monitors))
+	idMap := make(map[int64]int64)
+	monitorIDs := make(map[int64]struct{})
+	dumpIDs := make(map[int64]struct{})
 	var maxMonitorID int64
-	for _, m := range dump.Monitors {
-		newID, err := insertMonitorTx(ctx, tx, m)
-		if err != nil {
-			return err
-		}
-		if m.ID > 0 {
-			idMap[m.ID] = newID
-		}
-		if newID > maxMonitorID {
-			maxMonitorID = newID
-		}
-		monitorIDs[newID] = struct{}{}
+
+	if _, err := src.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind dump: %w", err)
+	}
+	err = walkDumpObject(src, map[string]dumpHandler{
+		"monitors": func(dec *json.Decoder) error {
+			return eachArrayElement(dec, func() error {
+				var m models.Monitor
+				if err := dec.Decode(&m); err != nil {
+					return errInvalidDump
+				}
+				if strings.TrimSpace(m.Name) == "" || strings.TrimSpace(m.URL) == "" {
+					return fmt.Errorf("у каждого монитора должны быть имя и URL")
+				}
+				if m.ID > 0 {
+					if _, dup := dumpIDs[m.ID]; dup {
+						return fmt.Errorf("повторяющийся id монитора: %d", m.ID)
+					}
+					dumpIDs[m.ID] = struct{}{}
+				}
+				newID, err := insertMonitorTx(ctx, tx, m)
+				if err != nil {
+					return err
+				}
+				if m.ID > 0 {
+					idMap[m.ID] = newID
+				}
+				if newID > maxMonitorID {
+					maxMonitorID = newID
+				}
+				monitorIDs[newID] = struct{}{}
+				return nil
+			})
+		},
+	})
+	if err != nil {
+		return err
 	}
 
+	resolve := func(id int64) (int64, bool) {
+		if mapped, ok := idMap[id]; ok {
+			return mapped, true
+		}
+		if _, ok := monitorIDs[id]; ok {
+			return id, true
+		}
+		return 0, false
+	}
+
+	checks := newCheckBatch(tx)
 	var maxCheckID int64
-	for _, c := range dump.Checks {
-		monitorID := c.MonitorID
-		if mapped, ok := idMap[c.MonitorID]; ok {
-			monitorID = mapped
-		}
-		if _, ok := monitorIDs[monitorID]; !ok {
-			return fmt.Errorf("проверка ссылается на неизвестный monitor_id %d", c.MonitorID)
-		}
-		c.MonitorID = monitorID
-		if err := insertCheckTx(ctx, tx, c); err != nil {
-			return err
-		}
-		if c.ID > maxCheckID {
-			maxCheckID = c.ID
-		}
-	}
 
-	for _, state := range dump.AlertStates {
-		monitorID := state.MonitorID
-		if mapped, ok := idMap[state.MonitorID]; ok {
-			monitorID = mapped
-		}
-		if _, ok := monitorIDs[monitorID]; !ok {
-			return fmt.Errorf("состояние алерта ссылается на неизвестный monitor_id %d", state.MonitorID)
-		}
-		state.MonitorID = monitorID
-		if err := insertAlertStateTx(ctx, tx, state); err != nil {
-			return err
-		}
+	if _, err := src.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind dump: %w", err)
+	}
+	err = walkDumpObject(src, map[string]dumpHandler{
+		"checks": func(dec *json.Decoder) error {
+			return eachArrayElement(dec, func() error {
+				var c models.Check
+				if err := dec.Decode(&c); err != nil {
+					return errInvalidDump
+				}
+				monitorID, ok := resolve(c.MonitorID)
+				if !ok {
+					return fmt.Errorf("проверка ссылается на неизвестный monitor_id %d", c.MonitorID)
+				}
+				c.MonitorID = monitorID
+				if c.ID > maxCheckID {
+					maxCheckID = c.ID
+				}
+				return checks.add(ctx, c)
+			})
+		},
+		"alert_states": func(dec *json.Decoder) error {
+			return eachArrayElement(dec, func() error {
+				var state models.AlertState
+				if err := dec.Decode(&state); err != nil {
+					return errInvalidDump
+				}
+				monitorID, ok := resolve(state.MonitorID)
+				if !ok {
+					return fmt.Errorf("состояние алерта ссылается на неизвестный monitor_id %d", state.MonitorID)
+				}
+				state.MonitorID = monitorID
+				return insertAlertStateTx(ctx, tx, state)
+			})
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if err := checks.flush(ctx); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -514,9 +732,160 @@ func (s *Store) ImportDump(ctx context.Context, dump models.Dump) error {
 	return nil
 }
 
+var errInvalidDump = errors.New("файл не является корректным JSON-дампом webChecker")
+
+type dumpHandler func(*json.Decoder) error
+
+// walkDumpObject обходит объект верхнего уровня, вызывая обработчик для
+// известных ключей и пропуская остальные значения без буферизации.
+func walkDumpObject(src io.Reader, handlers map[string]dumpHandler) error {
+	dec := json.NewDecoder(src)
+	if err := expectDelim(dec, '{'); err != nil {
+		return err
+	}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return errInvalidDump
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return errInvalidDump
+		}
+		if handler, known := handlers[key]; known {
+			if err := handler(dec); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := skipValue(dec); err != nil {
+			return err
+		}
+	}
+	return expectDelim(dec, '}')
+}
+
+func readDumpVersion(src io.ReadSeeker) (int, error) {
+	if _, err := src.Seek(0, io.SeekStart); err != nil {
+		return 0, fmt.Errorf("rewind dump: %w", err)
+	}
+	version := 0
+	err := walkDumpObject(src, map[string]dumpHandler{
+		"version": func(dec *json.Decoder) error {
+			if err := dec.Decode(&version); err != nil {
+				return errInvalidDump
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		return 0, err
+	}
+	return version, nil
+}
+
+func eachArrayElement(dec *json.Decoder, decode func() error) error {
+	if err := expectDelim(dec, '['); err != nil {
+		return err
+	}
+	for dec.More() {
+		if err := decode(); err != nil {
+			return err
+		}
+	}
+	return expectDelim(dec, ']')
+}
+
+func expectDelim(dec *json.Decoder, want json.Delim) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return errInvalidDump
+	}
+	got, ok := tok.(json.Delim)
+	if !ok || got != want {
+		return errInvalidDump
+	}
+	return nil
+}
+
+// skipValue проматывает значение любой вложенности по токенам, не собирая его
+// в памяти: в первом проходе так пропускается массив checks.
+func skipValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return errInvalidDump
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	if delim != '[' && delim != '{' {
+		return errInvalidDump
+	}
+	for dec.More() {
+		if err := skipValue(dec); err != nil {
+			return err
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return errInvalidDump
+	}
+	return nil
+}
+
+const checkBatchSize = 500
+
+// checkBatch вставляет проверки пачками: построчный INSERT на миллионе строк
+// превращает импорт в часы ожидания.
+type checkBatch struct {
+	tx   *sql.Tx
+	args []any
+	rows int
+}
+
+func newCheckBatch(tx *sql.Tx) *checkBatch {
+	return &checkBatch{tx: tx, args: make([]any, 0, checkBatchSize*8)}
+}
+
+func (b *checkBatch) add(ctx context.Context, c models.Check) error {
+	checked := c.CheckedAt.UTC()
+	if checked.IsZero() {
+		checked = time.Now().UTC()
+	}
+	// NULL в AUTO_INCREMENT означает "назначь сам", поэтому дампы с id и без
+	// него попадают в одну пачку.
+	var id any
+	if c.ID > 0 {
+		id = c.ID
+	}
+	b.args = append(b.args, id, c.MonitorID, checked, c.StatusCode, c.ResponseMS,
+		boolToInt(c.OK), boolToInt(c.Slow), nullIfEmpty(c.ErrorText))
+	b.rows++
+	if b.rows >= checkBatchSize {
+		return b.flush(ctx)
+	}
+	return nil
+}
+
+func (b *checkBatch) flush(ctx context.Context) error {
+	if b.rows == 0 {
+		return nil
+	}
+	values := strings.TrimSuffix(strings.Repeat("(?, ?, ?, ?, ?, ?, ?, ?),", b.rows), ",")
+	_, err := b.tx.ExecContext(ctx, `
+		INSERT INTO checks (id, monitor_id, checked_at, status_code, response_ms, ok, slow, error_text)
+		VALUES `+values, b.args...)
+	if err != nil {
+		return fmt.Errorf("import checks: %w", err)
+	}
+	b.args = b.args[:0]
+	b.rows = 0
+	return nil
+}
+
 func (s *Store) listMonitorsByID(ctx context.Context) ([]models.Monitor, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, url, interval_seconds, expected_status, timeout_seconds,
+		SELECT id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
 		       slow_threshold_ms, fail_threshold, enabled, created_at, updated_at
 		FROM monitors
 		ORDER BY id
@@ -588,6 +957,12 @@ func insertMonitorTx(ctx context.Context, tx *sql.Tx, m models.Monitor) (int64, 
 	if m.IntervalSeconds < 1 {
 		m.IntervalSeconds = 60
 	}
+	if m.RetryIntervalSeconds < 1 {
+		m.RetryIntervalSeconds = 10
+	}
+	if m.RetryIntervalSeconds > m.IntervalSeconds {
+		m.RetryIntervalSeconds = m.IntervalSeconds
+	}
 	if m.ExpectedStatus < 1 {
 		m.ExpectedStatus = 200
 	}
@@ -610,10 +985,10 @@ func insertMonitorTx(ctx context.Context, tx *sql.Tx, m models.Monitor) (int64, 
 
 	if m.ID > 0 {
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO monitors (id, name, url, interval_seconds, expected_status, timeout_seconds,
+			INSERT INTO monitors (id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
 			                      slow_threshold_ms, fail_threshold, enabled, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, m.ID, m.Name, m.URL, m.IntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), created, updated)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, m.ID, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), created, updated)
 		if err != nil {
 			return 0, fmt.Errorf("import monitor %d: %w", m.ID, err)
 		}
@@ -621,10 +996,10 @@ func insertMonitorTx(ctx context.Context, tx *sql.Tx, m models.Monitor) (int64, 
 	}
 
 	res, err := tx.ExecContext(ctx, `
-		INSERT INTO monitors (name, url, interval_seconds, expected_status, timeout_seconds,
+		INSERT INTO monitors (name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
 		                      slow_threshold_ms, fail_threshold, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, m.Name, m.URL, m.IntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), created, updated)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), created, updated)
 	if err != nil {
 		return 0, fmt.Errorf("import monitor: %w", err)
 	}
@@ -714,7 +1089,7 @@ func scanMonitor(sc scanner) (models.Monitor, error) {
 	var m models.Monitor
 	var enabled int
 	err := sc.Scan(
-		&m.ID, &m.Name, &m.URL, &m.IntervalSeconds, &m.ExpectedStatus, &m.TimeoutSeconds,
+		&m.ID, &m.Name, &m.URL, &m.IntervalSeconds, &m.RetryIntervalSeconds, &m.ExpectedStatus, &m.TimeoutSeconds,
 		&m.SlowThresholdMS, &m.FailThreshold, &enabled, &m.CreatedAt, &m.UpdatedAt,
 	)
 	if err != nil {
