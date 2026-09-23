@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -27,6 +28,7 @@ type Scheduler struct {
 	mu       sync.Mutex
 	state    map[int64]runState
 	inFlight map[int64]struct{}
+	paused   bool
 }
 
 func New(st *store.Store, chk *checker.Checker, al *alerter.Alerter, workers int, retentionDays int) *Scheduler {
@@ -71,8 +73,14 @@ func (s *Scheduler) Run(ctx context.Context) {
 			wg.Wait()
 			return
 		case <-retentionTicker.C:
+			if s.isPaused() {
+				continue
+			}
 			s.cleanup(ctx)
 		case <-ticker.C:
+			if s.isPaused() {
+				continue
+			}
 			monitors, err := s.store.ListEnabledMonitors(ctx)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -91,6 +99,52 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
+func (s *Scheduler) isPaused() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.paused
+}
+
+// Pause прекращает постановку новых проверок и ждёт, пока завершатся уже
+// запущенные. Нужен для импорта дампа: он удаляет monitors и checks целиком, а
+// параллельный INSERT воркера упирается в блокировку или внешний ключ.
+func (s *Scheduler) Pause(ctx context.Context) (func(), error) {
+	s.mu.Lock()
+	if s.paused {
+		s.mu.Unlock()
+		return nil, errors.New("планировщик уже приостановлен")
+	}
+	s.paused = true
+	s.mu.Unlock()
+
+	resume := func() {
+		s.mu.Lock()
+		s.paused = false
+		// Данные могли полностью замениться, поэтому фазы пересеиваются из БД.
+		s.state = make(map[int64]runState)
+		s.mu.Unlock()
+		slog.Info("scheduler resumed")
+	}
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		s.mu.Lock()
+		running := len(s.inFlight)
+		s.mu.Unlock()
+		if running == 0 {
+			slog.Info("scheduler paused")
+			return resume, nil
+		}
+		select {
+		case <-ctx.Done():
+			resume()
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 func (s *Scheduler) seedLastRuns(ctx context.Context, monitors []models.Monitor, now time.Time) {
 	var missing []models.Monitor
 	s.mu.Lock()
@@ -100,16 +154,27 @@ func (s *Scheduler) seedLastRuns(ctx context.Context, monitors []models.Monitor,
 		}
 	}
 	s.mu.Unlock()
+	if len(missing) == 0 {
+		return
+	}
+
+	// Один запрос на всех: при старте с сотней мониторов поштучный LastCheck
+	// давал сотню обращений к БД.
+	ids := make([]int64, 0, len(missing))
+	for _, mon := range missing {
+		ids = append(ids, mon.ID)
+	}
+	lastChecks, err := s.store.LastChecks(ctx, ids)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		slog.Error("scheduler last checks failed", "error", err)
+		lastChecks = nil
+	}
 
 	for _, mon := range missing {
-		last, err := s.store.LastCheck(ctx, mon.ID)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			slog.Error("scheduler last check failed", "monitor_id", mon.ID, "error", err)
-			last = nil
-		}
+		last := lastChecks[mon.ID]
 		seeded := runState{
 			lastRun: initialLastRun(now, mon, last),
 			lastOK:  last == nil || last.OK,
@@ -125,6 +190,10 @@ func (s *Scheduler) seedLastRuns(ctx context.Context, monitors []models.Monitor,
 func (s *Scheduler) enqueueDue(monitors []models.Monitor, now time.Time, jobs chan models.Monitor) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.paused {
+		return
+	}
 
 	active := make(map[int64]struct{}, len(monitors))
 	for _, mon := range monitors {

@@ -52,17 +52,34 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		}
 
 		slog.Info("applying migration", "version", name)
-		for _, stmt := range splitSQL(string(raw)) {
-			if _, err := database.ExecContext(ctx, stmt); err != nil {
-				return fmt.Errorf("apply migration %s: %w", name, err)
-			}
-		}
-
-		if _, err := database.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", name); err != nil {
-			return fmt.Errorf("record migration %s: %w", name, err)
+		if err := applyMigration(ctx, database, name, string(raw)); err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+// applyMigration выполняет все statement'ы файла на одном соединении. DDL в
+// MySQL не откатывается, поэтому миграции написаны идемпотентно (IF NOT EXISTS
+// и проверки information_schema) и переживают повторный запуск после сбоя. Для
+// этого нужна одна сессия: сессионные переменные и PREPARE не видны на другом
+// соединении пула.
+func applyMigration(ctx context.Context, database *sql.DB, name, script string) error {
+	conn, err := database.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("migration %s: acquire connection: %w", name, err)
+	}
+	defer conn.Close()
+
+	for _, stmt := range splitSQL(script) {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("apply migration %s: %w", name, err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", name); err != nil {
+		return fmt.Errorf("record migration %s: %w", name, err)
+	}
 	return nil
 }
 

@@ -22,6 +22,7 @@ type Config struct {
 	TelegramSlowAlerts bool
 	StatsRetentionDays int
 	CheckerWorkers     int
+	BlockPrivateHosts  bool
 }
 
 func Load() (Config, error) {
@@ -46,6 +47,12 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.TelegramSlowAlerts, err = envBool("TELEGRAM_SLOW_ALERTS", true)
+	if err != nil {
+		return Config{}, err
+	}
+	// По умолчанию выключено: в Docker внутренние адреса вроде http://app:8080
+	// — обычный сценарий мониторинга.
+	cfg.BlockPrivateHosts, err = envBool("CHECK_BLOCK_PRIVATE_HOSTS", false)
 	if err != nil {
 		return Config{}, err
 	}

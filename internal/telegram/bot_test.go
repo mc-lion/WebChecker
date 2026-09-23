@@ -1,6 +1,10 @@
 package telegram
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
 func TestParseCommand(t *testing.T) {
 	cases := []struct {
@@ -44,5 +48,34 @@ func TestSplitMessage(t *testing.T) {
 	parts := splitMessage("aaa\nbbb\nccc", 7)
 	if len(parts) != 2 {
 		t.Fatalf("got %#v", parts)
+	}
+}
+
+func TestSplitMessageKeepsRunesIntact(t *testing.T) {
+	// Кириллица: 2 байта на символ, поэтому побайтовая резка ломала символы.
+	long := strings.Repeat("я", 25)
+	parts := splitMessage(long, 10)
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 parts, got %#v", parts)
+	}
+	for _, p := range parts {
+		if !utf8.ValidString(p) {
+			t.Fatalf("part is not valid utf8: %q", p)
+		}
+		if utf8.RuneCountInString(p) > 10 {
+			t.Fatalf("part longer than limit: %d runes", utf8.RuneCountInString(p))
+		}
+	}
+	if joined := strings.Join(parts, ""); joined != long {
+		t.Fatalf("content lost: %q", joined)
+	}
+}
+
+func TestSplitMessageCountsRunesNotBytes(t *testing.T) {
+	// 100 кириллических символов — это 200 байт, но лимит в 150 символов
+	// не должен приводить к разбиению.
+	text := strings.Repeat("о", 100)
+	if parts := splitMessage(text, 150); len(parts) != 1 {
+		t.Fatalf("expected single part, got %d", len(parts))
 	}
 }

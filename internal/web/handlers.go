@@ -10,9 +10,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"webchecker/internal/config"
 	"webchecker/internal/models"
@@ -21,19 +23,26 @@ import (
 	webassets "webchecker/web"
 )
 
+// Pauser останавливает фоновые проверки на время операций, которые
+// перезаписывают БД целиком (импорт дампа).
+type Pauser interface {
+	Pause(ctx context.Context) (func(), error)
+}
+
 type Server struct {
 	cfg   config.Config
 	store *store.Store
 	tg    *telegram.Client
+	sched Pauser
 	pages map[string]*template.Template
 }
 
-func New(cfg config.Config, st *store.Store, tg *telegram.Client) (*Server, error) {
+func New(cfg config.Config, st *store.Store, tg *telegram.Client, sched Pauser) (*Server, error) {
 	pages, err := parseTemplates()
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, store: st, tg: tg, pages: pages}, nil
+	return &Server{cfg: cfg, store: st, tg: tg, sched: sched, pages: pages}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -55,8 +64,8 @@ func (s *Server) Handler() http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
-	mux.Handle("/", basicAuth(s.cfg.BasicAuthUser, s.cfg.BasicAuthPassword, protected))
-	return logging(mux)
+	mux.Handle("/", basicAuth(s.cfg.BasicAuthUser, s.cfg.BasicAuthPassword, sameOriginOnly(protected)))
+	return logging(recoverPanic(mux))
 }
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -193,16 +202,11 @@ func (s *Server) toggle(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	mon, err := s.store.GetMonitor(r.Context(), id)
-	if errors.Is(err, store.ErrNotFound) {
-		http.NotFound(w, r)
-		return
-	}
-	if err != nil {
-		s.serverError(w, "get monitor", err)
-		return
-	}
-	if err := s.store.SetMonitorEnabled(r.Context(), id, !mon.Enabled); err != nil {
+	if err := s.store.ToggleMonitorEnabled(r.Context(), id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
 		s.serverError(w, "toggle monitor", err)
 		return
 	}
@@ -272,7 +276,8 @@ func (s *Server) checksJSON(w http.ResponseWriter, r *http.Request) {
 	for i := len(checks) - 1; i >= 0; i-- {
 		c := checks[i]
 		points = append(points, point{
-			T:  c.CheckedAt.Local().Format("15:04:05"),
+			// С датой: на длинной истории одно время суток встречается много раз.
+			T:  c.CheckedAt.Local().Format("02.01 15:04:05"),
 			MS: c.ResponseMS,
 			OK: c.OK,
 		})
@@ -290,6 +295,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		"TelegramSlowAlerts": s.cfg.TelegramSlowAlerts,
 		"RetentionDays":      s.cfg.StatsRetentionDays,
 		"CheckerWorkers":     s.cfg.CheckerWorkers,
+		"BlockPrivateHosts":  s.cfg.BlockPrivateHosts,
 	})
 }
 
@@ -303,28 +309,38 @@ func (s *Server) telegramTest(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/settings?msg=telegram_ok", http.StatusSeeOther)
 }
 
-const maxImportBytes = 32 << 20
+const (
+	// Жёсткий предел на загружаемый дамп. Экспорт с историей легко перерастает
+	// десятки мегабайт, поэтому лимит импорта должен быть заметно выше.
+	maxImportBytes = 512 << 20
+	// Сколько от multipart-формы держать в памяти, остальное уходит в файл.
+	importMemoryBytes = 8 << 20
+	// Сколько ждать завершения текущих проверок перед импортом.
+	importPauseTimeout = 30 * time.Second
+)
 
 func (s *Server) exportDump(w http.ResponseWriter, r *http.Request) {
-	dump, err := s.store.ExportDump(r.Context())
-	if err != nil {
-		s.serverError(w, "export dump", err)
-		return
+	includeChecks := r.URL.Query().Get("checks") != "0"
+
+	suffix := "full"
+	if !includeChecks {
+		suffix = "monitors"
 	}
-	filename := fmt.Sprintf("webchecker-%s.json", time.Now().Local().Format("20060102-150405"))
+	filename := fmt.Sprintf("webchecker-%s-%s.json", suffix, time.Now().Local().Format("20060102-150405"))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(dump); err != nil {
-		slog.Error("encode dump", "error", err)
+
+	// Ответ пишется потоком, поэтому об ошибке на середине можно только
+	// сообщить в лог: заголовки уже уехали клиенту.
+	if err := s.store.StreamDump(r.Context(), w, includeChecks); err != nil {
+		slog.Error("export dump", "error", err, "include_checks", includeChecks)
 	}
 }
 
 func (s *Server) importDump(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxImportBytes+1024)
-	if err := r.ParseMultipartForm(maxImportBytes); err != nil {
-		http.Redirect(w, r, "/settings?err="+urlQuery("Не удалось прочитать файл. Максимум 32 МБ."), http.StatusSeeOther)
+	if err := r.ParseMultipartForm(importMemoryBytes); err != nil {
+		http.Redirect(w, r, "/settings?err="+urlQuery("Не удалось прочитать файл. Максимум 512 МБ."), http.StatusSeeOther)
 		return
 	}
 	file, header, err := r.FormFile("dump")
@@ -334,17 +350,26 @@ func (s *Server) importDump(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 	if header.Size > maxImportBytes {
-		http.Redirect(w, r, "/settings?err="+urlQuery("Файл слишком большой (максимум 32 МБ)"), http.StatusSeeOther)
+		http.Redirect(w, r, "/settings?err="+urlQuery("Файл слишком большой (максимум 512 МБ)"), http.StatusSeeOther)
 		return
 	}
 
-	var dump models.Dump
-	dec := json.NewDecoder(file)
-	if err := dec.Decode(&dump); err != nil {
-		http.Redirect(w, r, "/settings?err="+urlQuery("Файл не является корректным JSON-дампом"), http.StatusSeeOther)
-		return
+	// Импорт удаляет monitors и checks целиком, поэтому параллельные проверки
+	// нужно сначала остановить, иначе их INSERT упрётся в блокировку.
+	if s.sched != nil {
+		pauseCtx, cancel := context.WithTimeout(r.Context(), importPauseTimeout)
+		resume, err := s.sched.Pause(pauseCtx)
+		cancel()
+		if err != nil {
+			slog.Error("import: scheduler pause failed", "error", err)
+			http.Redirect(w, r, "/settings?err="+urlQuery("Не удалось приостановить проверки, повторите попытку"), http.StatusSeeOther)
+			return
+		}
+		defer resume()
 	}
-	if err := s.store.ImportDump(r.Context(), dump); err != nil {
+
+	if err := s.store.ImportStream(r.Context(), file); err != nil {
+		slog.Error("import dump", "error", err)
 		http.Redirect(w, r, "/settings?err="+urlQuery(err.Error()), http.StatusSeeOther)
 		return
 	}
@@ -484,20 +509,62 @@ func statusText(code *int) string {
 	return strconv.Itoa(*code)
 }
 
+// urlQuery обрезает сообщение по рунам: текст русский, обрезка по байтам
+// оставляет в строке половину символа.
 func urlQuery(s string) string {
-	if len(s) > 180 {
-		s = s[:180]
+	const maxRunes = 180
+	if utf8.RuneCountInString(s) > maxRunes {
+		runes := []rune(s)
+		s = string(runes[:maxRunes])
 	}
 	return url.QueryEscape(s)
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusRecorder) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusRecorder) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func recoverPanic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				if rec == http.ErrAbortHandler {
+					panic(rec)
+				}
+				slog.Error("panic in handler", "method", r.Method, "path", r.URL.Path, "panic", rec, "stack", string(debug.Stack()))
+				http.Error(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 func logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
+		rec := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
 		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/static/") {
 			return
 		}
-		slog.Info("http", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(start).Milliseconds())
+		if rec.status == 0 {
+			rec.status = http.StatusOK
+		}
+		slog.Info("http", "method", r.Method, "path", r.URL.Path, "status", rec.status, "duration_ms", time.Since(start).Milliseconds())
 	})
 }

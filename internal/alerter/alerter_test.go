@@ -31,6 +31,21 @@ func TestEvaluateSlowDisabled(t *testing.T) {
 	}
 }
 
+func TestEvaluateTimeoutSendsOnlyDown(t *testing.T) {
+	mon := models.Monitor{FailThreshold: 1, SlowThresholdMS: 3000}
+	check := models.Check{OK: false, Slow: true, ResponseMS: 10000, ErrorText: "context deadline exceeded"}
+	_, down, slow, recovery := evaluate(models.AlertState{}, mon, check, true)
+	if !down {
+		t.Fatal("timeout must send down alert")
+	}
+	if slow {
+		t.Fatal("timeout must not also send slow alert")
+	}
+	if recovery {
+		t.Fatal("unexpected recovery")
+	}
+}
+
 func TestEvaluateSlowEqualsThreshold(t *testing.T) {
 	mon := models.Monitor{FailThreshold: 1, SlowThresholdMS: 200}
 	check := models.Check{OK: true, Slow: true, ResponseMS: 200}

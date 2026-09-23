@@ -62,7 +62,7 @@ flowchart TB
 | HTTP | `internal/web` | Дашборд, CRUD, статистика, настройки, экспорт/импорт |
 | Бот | `internal/telegram` | Long polling `getUpdates`, команды `list` / `stat` / `help` |
 
-Остановка: SIGINT/SIGTERM → отмена контекста → graceful shutdown HTTP (до 10 с). Планировщик и бот выходят по тому же контексту.
+Остановка: SIGINT/SIGTERM → отмена контекста → graceful shutdown HTTP (до 10 с) → ожидание планировщика и бота (до 15 с). Раньше процесс уходил сразу после HTTP, не дав воркерам дописать результаты проверок.
 
 ## Пакеты
 
@@ -116,7 +116,8 @@ webChecker/
 ├── migrations/
 │   ├── embed.go
 │   ├── 001_init.sql            monitors, checks, alert_states
-│   └── 002_retry_interval.sql  retry_interval_seconds
+│   ├── 002_retry_interval.sql  retry_interval_seconds
+│   └── 003_checks_monitor_id_index.sql  индекс (monitor_id, id)
 ├── docs/                       эта документация
 ├── Dockerfile
 ├── docker-compose.yml
@@ -135,6 +136,8 @@ webChecker/
 
 Сервер — стандартный `net/http.ServeMux` (Go 1.22+). Все страницы, кроме `GET /healthz`, закрыты HTTP Basic Auth. Логин и пароль — из env, сравнение через `crypto/subtle`.
 
+Цепочка middleware снаружи внутрь: `logging` (метод, путь, статус, длительность) → `recoverPanic` (паника превращается в `500`, стек в лог) → `basicAuth` → `sameOriginOnly` (защита изменяющих запросов от CSRF) → маршруты.
+
 | Метод | Путь | Назначение |
 | --- | --- | --- |
 | GET | `/healthz` | Готовность: ping MySQL, без auth |
@@ -149,8 +152,8 @@ webChecker/
 | POST | `/monitors/{id}/toggle` | Вкл/выкл |
 | GET | `/settings` | Telegram, retention, экспорт/импорт |
 | POST | `/settings/telegram-test` | Тестовое сообщение (не зависит от флага алертов) |
-| GET | `/settings/export` | JSON-дамп БД |
-| POST | `/settings/import` | Замена данных из JSON |
+| GET | `/settings/export` | JSON-дамп БД потоком; `?checks=0` — без истории |
+| POST | `/settings/import` | Замена данных из JSON (планировщик на паузе) |
 | GET | `/static/` | CSS и JS из embed |
 
 Формы — обычный POST и redirect. JavaScript нужен для графика Chart.js и `confirm` при удалении/импорте.

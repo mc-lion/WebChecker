@@ -31,6 +31,7 @@
         <dl>
             <div><dt>Хранение статистики</dt><dd>{{.RetentionDays}} дней</dd></div>
             <div><dt>Воркеры проверок</dt><dd>{{.CheckerWorkers}}</dd></div>
+            <div><dt>Внутренние адреса</dt><dd>{{if .BlockPrivateHosts}}запрещены{{else}}разрешены{{end}}</dd></div>
         </dl>
         <p class="muted">Чтобы сменить логин, пароль или параметры БД, обновите переменные окружения и перезапустите контейнер.</p>
     </article>
@@ -38,10 +39,12 @@
 
 <article class="card">
     <h2>Экспорт и импорт</h2>
-    <p class="muted">Сохраните мониторы, историю проверок и состояния алертов в JSON — или восстановите их из файла. Импорт полностью заменяет текущие данные.</p>
+    <p class="muted">Сохраните мониторы, историю проверок и состояния алертов в JSON — или восстановите их из файла. Импорт полностью заменяет текущие данные и на время работы приостанавливает проверки.</p>
     <div class="form-actions">
-        <a class="btn btn-primary" href="/settings/export">Скачать JSON</a>
+        <a class="btn btn-primary" href="/settings/export">Скачать всё</a>
+        <a class="btn" href="/settings/export?checks=0">Только настройки</a>
     </div>
+    <p class="muted tiny">«Только настройки» не включает историю проверок: файл получается небольшим и подходит для переноса списка URL на другой сервер.</p>
     <form method="post" action="/settings/import" enctype="multipart/form-data" class="import-form" data-confirm="Импорт заменит все мониторы, проверки и состояния алертов. Продолжить?">
         <label>
             Файл дампа

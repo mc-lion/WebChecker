@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"syscall"
 	"time"
 
 	"webchecker/internal/models"
@@ -17,7 +19,23 @@ type Checker struct {
 }
 
 func New() *Checker {
+	return NewWithOptions(false)
+}
+
+// NewWithOptions собирает checker; blockPrivateHosts запрещает проверки по
+// адресам внутренних сетей. Проверка стоит на уровне соединения, поэтому
+// перекрывает и редиректы, и подмену DNS уже после валидации URL.
+func NewWithOptions(blockPrivateHosts bool) *Checker {
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	if blockPrivateHosts {
+		dialer.Control = denyPrivateAddress
+	}
+
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = dialer.DialContext
 	transport.MaxIdleConns = 64
 	transport.MaxIdleConnsPerHost = 8
 
@@ -32,6 +50,30 @@ func New() *Checker {
 			},
 		},
 	}
+}
+
+func denyPrivateAddress(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("не удалось разобрать адрес %q", address)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("не удалось разобрать IP %q", host)
+	}
+	if isInternalIP(ip) {
+		return fmt.Errorf("адрес %s относится к внутренней сети, проверка запрещена (CHECK_BLOCK_PRIVATE_HOSTS=true)", ip)
+	}
+	return nil
+}
+
+func isInternalIP(ip net.IP) bool {
+	return ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast()
 }
 
 func (c *Checker) Check(ctx context.Context, mon models.Monitor) models.Check {

@@ -13,7 +13,7 @@ func TestHandlerBasicAuthAndStatic(t *testing.T) {
 	srv, err := New(config.Config{
 		BasicAuthUser:     "admin",
 		BasicAuthPassword: "secret",
-	}, nil, telegram.New(config.Config{}))
+	}, nil, telegram.New(config.Config{}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

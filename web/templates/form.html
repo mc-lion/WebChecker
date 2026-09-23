@@ -23,7 +23,8 @@
         </label>
         <label>
             Интервал при ошибке, сек
-            <input type="number" name="retry_interval_seconds" value="{{.Monitor.RetryIntervalSeconds}}" min="1" max="86400" required>
+            <input type="number" name="retry_interval_seconds" value="{{.Monitor.RetryIntervalSeconds}}" min="1" max="{{.Monitor.IntervalSeconds}}" data-max-from="interval_seconds" required>
+            <span class="muted tiny">не больше основного интервала</span>
         </label>
         <label>
             Ожидаемый статус
