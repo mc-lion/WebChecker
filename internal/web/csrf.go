@@ -63,13 +63,11 @@ func allowedOrigin(r *http.Request) bool {
 		return false
 	}
 
-	if origin == "null" {
-		return false
-	}
-	if origin == "" {
-		// Нет Origin. Обычная HTML-форма в части браузеров не шлёт заголовки.
-		// same-site без Origin — уже не форма с той же страницы.
-		return fetchSite != "same-site"
+	if origin == "" || origin == "null" {
+		// HTTP по IP без домена: часть браузеров шлёт Origin: null и не ставит
+		// Sec-Fetch-Site. Настоящий CSRF из iframe на чужом сайте приходит с
+		// Sec-Fetch-Site: cross-site / same-site.
+		return fetchSite != "same-site" && fetchSite != "cross-site"
 	}
 	return false
 }
