@@ -89,7 +89,7 @@ docker compose up --build
 - Basic Auth работает по HTTP: **ставьте webChecker за reverse-proxy с HTTPS** (nginx, caddy, traefik), иначе логин и пароль видны в сети.
 - Пароль должен быть длинным. При `len(BASIC_AUTH_PASSWORD) < 10` сервер пишет предупреждение в лог; при `<4` отказывается стартовать.
 - Rate-limit: 5 неудачных попыток Basic Auth с одного IP за минуту → 429 на одну минуту.
-- CSRF-защита: изменяющие запросы (POST/PUT/DELETE) принимаются только с того же origin. Для curl/скриптов добавляйте заголовок `X-Requested-By: cli`.
+- CSRF-защита: изменяющие запросы с чужого сайта (`Sec-Fetch-Site: cross-site` или чужой `Origin`) отклоняются. Обычные формы из интерфейса и curl проходят.
 - SSRF: `CHECK_BLOCK_PRIVATE_HOSTS=true` по умолчанию блокирует проверки внутренних адресов (loopback, 10/8, 172.16/12, 192.168/16, 169.254/16, cloud metadata). Выключайте только если хотите мониторить внутренние сервисы в доверенной сети.
 - Security headers (`X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Content-Security-Policy`) выставляются на все ответы. HSTS — опционально, через `HTTP_HSTS=true`.
 - Включите HSTS только после настройки HTTPS, иначе браузер забьёт политику и доступ по http:// сломается.

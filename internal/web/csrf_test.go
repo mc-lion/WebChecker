@@ -18,10 +18,11 @@ func TestSameOriginOnly(t *testing.T) {
 		{"POST по прямой ссылке", http.MethodPost, map[string]string{"Sec-Fetch-Site": "none"}, true},
 		{"POST с чужого сайта", http.MethodPost, map[string]string{"Sec-Fetch-Site": "cross-site"}, false},
 		{"POST с поддомена", http.MethodPost, map[string]string{"Sec-Fetch-Site": "same-site"}, false},
+		{"POST same-site со своим Origin", http.MethodPost, map[string]string{"Sec-Fetch-Site": "same-site", "Origin": "http://webchecker.local"}, true},
 		{"POST с чужим Origin", http.MethodPost, map[string]string{"Origin": "https://evil.example"}, false},
 		{"POST со своим Origin", http.MethodPost, map[string]string{"Origin": "http://webchecker.local"}, true},
-		{"POST без заголовков — блокировано", http.MethodPost, nil, false},
-		{"POST из curl с X-Requested-By", http.MethodPost, map[string]string{"X-Requested-By": "cli"}, true},
+		{"POST без заголовков — форма из интерфейса", http.MethodPost, nil, true},
+		{"POST с Origin null", http.MethodPost, map[string]string{"Origin": "null"}, false},
 	}
 
 	for _, tc := range cases {

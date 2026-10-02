@@ -185,12 +185,25 @@ func TestVerifyErrorMessageKnownCodeDisplayed(t *testing.T) {
 	}
 }
 
-func TestVerifyCSRFBlocksEmptyHeadersPOST(t *testing.T) {
+func TestVerifyCSRFAllowsSameOriginFormPOST(t *testing.T) {
 	h := newTestServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/monitors/1/delete", nil)
 	req.Host = "webchecker.local"
 	req.SetBasicAuth("a", "b")
-	// Нет ни Sec-Fetch-Site, ни Origin, ни X-Requested-By.
+	// Как обычная HTML-форма: без Sec-Fetch-Site и без Origin.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code == http.StatusForbidden {
+		t.Fatal("same-origin форма без CSRF-заголовков не должна получать 403")
+	}
+}
+
+func TestVerifyCSRFBlocksCrossSitePOST(t *testing.T) {
+	h := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/monitors/1/delete", nil)
+	req.Host = "webchecker.local"
+	req.SetBasicAuth("a", "b")
+	req.Header.Set("Origin", "https://evil.example")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
