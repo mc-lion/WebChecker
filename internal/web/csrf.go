@@ -1,6 +1,8 @@
 package web
 
 import (
+	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,6 +17,13 @@ func sameOriginOnly(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		slog.Warn("csrf rejected",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"host", r.Host,
+			"origin", r.Header.Get("Origin"),
+			"sec_fetch_site", r.Header.Get("Sec-Fetch-Site"),
+		)
 		http.Error(w, "Запрос отклонён: проверьте, что форма отправлена из интерфейса webChecker", http.StatusForbidden)
 	})
 }
@@ -29,8 +38,24 @@ func safeMethod(method string) bool {
 }
 
 func allowedOrigin(r *http.Request) bool {
-	// Современные браузеры присылают Sec-Fetch-Site на навигационный POST.
 	fetchSite := r.Header.Get("Sec-Fetch-Site")
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+
+	// Origin — главный сигнал CSRF. Сверяем его раньше Sec-Fetch-Site:
+	// на доступе по IP без домена Chrome часто ставит cross-site, хотя форма
+	// отправлена с той же страницы.
+	if origin != "" && origin != "null" {
+		parsed, err := url.Parse(origin)
+		if err == nil && parsed.Host != "" {
+			if hostsMatch(parsed.Host, r.Host) {
+				return true
+			}
+			if !publicWebHost(parsed.Host) {
+				return true
+			}
+		}
+	}
+
 	switch fetchSite {
 	case "same-origin", "none":
 		return true
@@ -38,21 +63,57 @@ func allowedOrigin(r *http.Request) bool {
 		return false
 	}
 
-	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	if origin == "null" {
-		// opaque origin / песочница iframe — потенциальный CSRF.
 		return false
 	}
 	if origin == "" {
-		// Нет Origin. Обычная HTML-форма в части браузеров и расширений
-		// не шлёт ни Origin, ни Sec-Fetch-Site на same-origin POST.
-		// Кросс-сайтовый POST Origin шлёт всегда. same-site без Origin
-		// — это уже не форма с той же страницы.
+		// Нет Origin. Обычная HTML-форма в части браузеров не шлёт заголовки.
+		// same-site без Origin — уже не форма с той же страницы.
 		return fetchSite != "same-site"
 	}
-	parsed, err := url.Parse(origin)
-	if err != nil || parsed.Host == "" {
+	return false
+}
+
+func hostsMatch(originHost, reqHost string) bool {
+	oh, op := splitHostPort(originHost)
+	rh, rp := splitHostPort(reqHost)
+	if !strings.EqualFold(oh, rh) {
 		return false
 	}
-	return strings.EqualFold(parsed.Host, r.Host)
+	if op == rp || op == "" || rp == "" {
+		return true
+	}
+	return false
+}
+
+func splitHostPort(host string) (string, string) {
+	h, p, err := net.SplitHostPort(host)
+	if err != nil {
+		return host, ""
+	}
+	return h, p
+}
+
+// publicWebHost — хост, с которого реальный кросс-сайтовый CSRF возможен
+// (evil.example). IP, localhost, docker-имя и *.local сюда не входят.
+func publicWebHost(hostport string) bool {
+	host, _ := splitHostPort(hostport)
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "" || host == "localhost" {
+		return false
+	}
+	// Любой IP — не публичный сайт. Конкретный адрес не зашиваем:
+	// у контейнера он может меняться при каждом поднятии сети.
+	if net.ParseIP(host) != nil {
+		return false
+	}
+	if !strings.Contains(host, ".") {
+		return false
+	}
+	for _, suf := range []string{".local", ".lan", ".internal", ".home", ".corp", ".intranet"} {
+		if strings.HasSuffix(host, suf) {
+			return false
+		}
+	}
+	return true
 }

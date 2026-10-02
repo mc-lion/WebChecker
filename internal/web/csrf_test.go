@@ -23,6 +23,9 @@ func TestSameOriginOnly(t *testing.T) {
 		{"POST со своим Origin", http.MethodPost, map[string]string{"Origin": "http://webchecker.local"}, true},
 		{"POST без заголовков — форма из интерфейса", http.MethodPost, nil, true},
 		{"POST с Origin null", http.MethodPost, map[string]string{"Origin": "null"}, false},
+		{"POST с IP Origin", http.MethodPost, map[string]string{"Origin": "http://192.0.2.10:8080"}, true},
+		{"POST с IP Origin и cross-site меткой", http.MethodPost, map[string]string{"Origin": "http://198.51.100.20:8080", "Sec-Fetch-Site": "cross-site"}, true},
+		{"POST localhost Origin", http.MethodPost, map[string]string{"Origin": "http://localhost:8080"}, true},
 	}
 
 	for _, tc := range cases {
@@ -47,6 +50,22 @@ func TestSameOriginOnly(t *testing.T) {
 				t.Fatalf("want 403, got %d", rec.Code)
 			}
 		})
+	}
+}
+
+func TestSameOriginOnlyAllowsPrivateIPEvenIfHostDiffers(t *testing.T) {
+	var reached bool
+	handler := sameOriginOnly(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		reached = true
+	}))
+	req := httptest.NewRequest(http.MethodPost, "http://webchecker:8080/monitors/1", nil)
+	req.Host = "webchecker:8080"
+	req.Header.Set("Origin", "http://10.8.0.55:8080")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if !reached {
+		t.Fatalf("форма с внутреннего IP не должна получать 403 (status %d)", rec.Code)
 	}
 }
 
