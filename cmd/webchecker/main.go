@@ -44,6 +44,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	if len(cfg.BasicAuthPassword) < 10 {
+		slog.Warn("basic auth: пароль короче 10 символов, подвержен brute-force. Задайте BASIC_AUTH_PASSWORD длиннее.")
+	}
+
 	st := store.New(database)
 	tg := telegram.New(cfg)
 	al := alerter.New(st, tg, cfg.TelegramSlowAlerts)
@@ -79,12 +83,13 @@ func main() {
 		Addr:              cfg.HTTPAddr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
-		// Импорт дампа может занять минуты, а экспорт — отдавать сотни
-		// мегабайт, поэтому таймауты щедрые: они нужны против зависших
-		// соединений, а не для ограничения нормальной работы.
-		ReadTimeout:  30 * time.Minute,
-		WriteTimeout: 30 * time.Minute,
-		IdleTimeout:  2 * time.Minute,
+		// ReadTimeout/WriteTimeout на уровне сервера мы специально не ставим:
+		// иначе длинные export/import будут обрезаться. Защита от slowloris
+		// обеспечивается:
+		//   - коротким ReadHeaderTimeout выше;
+		//   - IdleTimeout на keep-alive;
+		//   - per-handler таймаутами внутри Server.Handler (см. web.Handler()).
+		IdleTimeout: 60 * time.Second,
 	}
 
 	go func() {

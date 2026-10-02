@@ -48,7 +48,8 @@ docker compose up --build
 | `TELEGRAM_SLOW_ALERTS` | Слать ли сообщения о долгом ответе (`true`/`false`) | `true` |
 | `STATS_RETENTION_DAYS` | Сколько дней хранить проверки | `30` |
 | `CHECKER_WORKERS` | Число параллельных проверок | `8` |
-| `CHECK_BLOCK_PRIVATE_HOSTS` | Запретить проверки внутренних адресов: loopback, приватные диапазоны, link-local | `false` |
+| `CHECK_BLOCK_PRIVATE_HOSTS` | Запретить проверки внутренних адресов: loopback, приватные диапазоны, link-local, cloud metadata | `true` |
+| `HTTP_HSTS` | Отправлять `Strict-Transport-Security`. Включать только за HTTPS-прокси. | `false` |
 | `TZ` | Часовой пояс отображения времени | `Europe/Moscow` |
 
 Если `TELEGRAM_ENABLED=true`, токен и chat id обязательны.
@@ -82,6 +83,17 @@ docker compose up --build
 На странице «Настройки» два варианта выгрузки: «Скачать всё» (мониторы, история проверок, состояния алертов) и «Только настройки» — без истории, для переноса списка URL. Файл пишется потоком, поэтому размер истории не упирается в память.
 
 Импорт полностью заменяет текущие данные. На время работы проверки приостанавливаются, файл читается потоково и вставляется пачками; предел размера — 512 МБ.
+
+## Безопасность
+
+- Basic Auth работает по HTTP: **ставьте webChecker за reverse-proxy с HTTPS** (nginx, caddy, traefik), иначе логин и пароль видны в сети.
+- Пароль должен быть длинным. При `len(BASIC_AUTH_PASSWORD) < 10` сервер пишет предупреждение в лог; при `<4` отказывается стартовать.
+- Rate-limit: 5 неудачных попыток Basic Auth с одного IP за минуту → 429 на одну минуту.
+- CSRF-защита: изменяющие запросы (POST/PUT/DELETE) принимаются только с того же origin. Для curl/скриптов добавляйте заголовок `X-Requested-By: cli`.
+- SSRF: `CHECK_BLOCK_PRIVATE_HOSTS=true` по умолчанию блокирует проверки внутренних адресов (loopback, 10/8, 172.16/12, 192.168/16, 169.254/16, cloud metadata). Выключайте только если хотите мониторить внутренние сервисы в доверенной сети.
+- Security headers (`X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Content-Security-Policy`) выставляются на все ответы. HSTS — опционально, через `HTTP_HSTS=true`.
+- Включите HSTS только после настройки HTTPS, иначе браузер забьёт политику и доступ по http:// сломается.
+- MySQL в docker-compose живёт в приватной сети. Если выносите БД наружу — поднимайте TLS на уровне инфраструктуры.
 
 ## Локальная сборка без Docker
 

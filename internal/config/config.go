@@ -23,6 +23,9 @@ type Config struct {
 	StatsRetentionDays int
 	CheckerWorkers     int
 	BlockPrivateHosts  bool
+	// EnableHSTS включает Strict-Transport-Security. По умолчанию выключено:
+	// за reverse-proxy с HTTPS включите, за прямым HTTP — оставьте выключенным.
+	EnableHSTS bool
 }
 
 func Load() (Config, error) {
@@ -50,15 +53,24 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	// По умолчанию выключено: в Docker внутренние адреса вроде http://app:8080
-	// — обычный сценарий мониторинга.
-	cfg.BlockPrivateHosts, err = envBool("CHECK_BLOCK_PRIVATE_HOSTS", false)
+	// По умолчанию включено: без блокировки авторизованный пользователь может
+	// направить проверку на cloud metadata (169.254.169.254), localhost или
+	// соседние сервисы в приватной сети. Если нужно мониторить внутренний
+	// http://app:8080 — ставьте CHECK_BLOCK_PRIVATE_HOSTS=false явно.
+	cfg.BlockPrivateHosts, err = envBool("CHECK_BLOCK_PRIVATE_HOSTS", true)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.EnableHSTS, err = envBool("HTTP_HSTS", false)
 	if err != nil {
 		return Config{}, err
 	}
 
 	if cfg.BasicAuthUser == "" || cfg.BasicAuthPassword == "" {
 		return Config{}, fmt.Errorf("BASIC_AUTH_USER and BASIC_AUTH_PASSWORD are required")
+	}
+	if len(cfg.BasicAuthPassword) < 4 {
+		return Config{}, fmt.Errorf("BASIC_AUTH_PASSWORD too short: minimum 4 characters")
 	}
 	if cfg.MySQLUser == "" || cfg.MySQLDatabase == "" {
 		return Config{}, fmt.Errorf("MYSQL_USER and MYSQL_DATABASE are required")

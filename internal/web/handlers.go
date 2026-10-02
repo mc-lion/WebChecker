@@ -9,12 +9,10 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"webchecker/internal/config"
 	"webchecker/internal/models"
@@ -45,27 +43,53 @@ func New(cfg config.Config, st *store.Store, tg *telegram.Client, sched Pauser) 
 	return &Server{cfg: cfg, store: st, tg: tg, sched: sched, pages: pages}, nil
 }
 
+// Жёсткий лимит на тело POST с формой. Формы у нас маленькие (десятки полей,
+// короткие строки), 64 КБ с запасом достаточно и защищает от DoS-попыток
+// надуть url.Values гигабайтами данных.
+const maxFormBytes = 64 << 10
+
+// Таймаут на обработку обычных запросов. Export/import намеренно его обходят.
+const defaultHandlerTimeout = 30 * time.Second
+
 func (s *Server) Handler() http.Handler {
+	short := func(h http.HandlerFunc) http.Handler {
+		return http.TimeoutHandler(h, defaultHandlerTimeout, "Таймаут обработки запроса")
+	}
+	shortPost := func(h http.HandlerFunc) http.Handler {
+		return limitBody(short(h), maxFormBytes)
+	}
+
 	protected := http.NewServeMux()
 	protected.Handle("GET /static/", staticHandler())
-	protected.HandleFunc("GET /{$}", s.dashboard)
-	protected.HandleFunc("GET /monitors/new", s.newForm)
-	protected.HandleFunc("POST /monitors", s.create)
-	protected.HandleFunc("GET /monitors/{id}", s.show)
-	protected.HandleFunc("GET /monitors/{id}/edit", s.editForm)
-	protected.HandleFunc("GET /monitors/{id}/checks.json", s.checksJSON)
-	protected.HandleFunc("POST /monitors/{id}", s.update)
-	protected.HandleFunc("POST /monitors/{id}/delete", s.delete)
-	protected.HandleFunc("POST /monitors/{id}/toggle", s.toggle)
-	protected.HandleFunc("GET /settings", s.settings)
-	protected.HandleFunc("POST /settings/telegram-test", s.telegramTest)
+	protected.Handle("GET /{$}", short(s.dashboard))
+	protected.Handle("GET /monitors/new", short(s.newForm))
+	protected.Handle("POST /monitors", shortPost(s.create))
+	protected.Handle("GET /monitors/{id}", short(s.show))
+	protected.Handle("GET /monitors/{id}/edit", short(s.editForm))
+	protected.Handle("GET /monitors/{id}/checks.json", short(s.checksJSON))
+	protected.Handle("POST /monitors/{id}", shortPost(s.update))
+	protected.Handle("POST /monitors/{id}/delete", shortPost(s.delete))
+	protected.Handle("POST /monitors/{id}/toggle", shortPost(s.toggle))
+	protected.Handle("GET /settings", short(s.settings))
+	protected.Handle("POST /settings/telegram-test", shortPost(s.telegramTest))
+	// Export/import могут выполняться минутами на крупных дампах, им короткий
+	// TimeoutHandler не подходит; MaxBytesReader на import выставляется внутри.
 	protected.HandleFunc("GET /settings/export", s.exportDump)
 	protected.HandleFunc("POST /settings/import", s.importDump)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.Handle("/", basicAuth(s.cfg.BasicAuthUser, s.cfg.BasicAuthPassword, sameOriginOnly(protected)))
-	return logging(recoverPanic(mux))
+	return logging(recoverPanic(securityHeaders(s.cfg.EnableHSTS, mux)))
+}
+
+// limitBody оборачивает POST-хэндлер, ограничивая тело запроса. ParseForm при
+// превышении вернёт ошибку, а writer сгенерирует 413.
+func limitBody(next http.Handler, n int64) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, n)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -303,7 +327,8 @@ func (s *Server) telegramTest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	if err := s.tg.Send(ctx, "webChecker: тестовое сообщение. Telegram подключён."); err != nil {
-		http.Redirect(w, r, "/settings?err="+urlQuery(err.Error()), http.StatusSeeOther)
+		slog.Error("telegram test", "error", err)
+		http.Redirect(w, r, "/settings?err=telegram_fail", http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, "/settings?msg=telegram_ok", http.StatusSeeOther)
@@ -340,17 +365,18 @@ func (s *Server) exportDump(w http.ResponseWriter, r *http.Request) {
 func (s *Server) importDump(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxImportBytes+1024)
 	if err := r.ParseMultipartForm(importMemoryBytes); err != nil {
-		http.Redirect(w, r, "/settings?err="+urlQuery("Не удалось прочитать файл. Максимум 512 МБ."), http.StatusSeeOther)
+		slog.Warn("import: parse multipart", "error", err)
+		http.Redirect(w, r, "/settings?err=import_read_fail", http.StatusSeeOther)
 		return
 	}
 	file, header, err := r.FormFile("dump")
 	if err != nil {
-		http.Redirect(w, r, "/settings?err="+urlQuery("Выберите JSON-файл для импорта"), http.StatusSeeOther)
+		http.Redirect(w, r, "/settings?err=import_no_file", http.StatusSeeOther)
 		return
 	}
 	defer file.Close()
 	if header.Size > maxImportBytes {
-		http.Redirect(w, r, "/settings?err="+urlQuery("Файл слишком большой (максимум 512 МБ)"), http.StatusSeeOther)
+		http.Redirect(w, r, "/settings?err=import_too_big", http.StatusSeeOther)
 		return
 	}
 
@@ -362,7 +388,7 @@ func (s *Server) importDump(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		if err != nil {
 			slog.Error("import: scheduler pause failed", "error", err)
-			http.Redirect(w, r, "/settings?err="+urlQuery("Не удалось приостановить проверки, повторите попытку"), http.StatusSeeOther)
+			http.Redirect(w, r, "/settings?err=scheduler_pause", http.StatusSeeOther)
 			return
 		}
 		defer resume()
@@ -370,7 +396,7 @@ func (s *Server) importDump(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.store.ImportStream(r.Context(), file); err != nil {
 		slog.Error("import dump", "error", err)
-		http.Redirect(w, r, "/settings?err="+urlQuery(err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/settings?err=import_fail", http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, "/settings?msg=imported", http.StatusSeeOther)
@@ -397,7 +423,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, dat
 		data["Flash"] = flashMessage(r.URL.Query().Get("msg"))
 	}
 	if _, exists := data["Error"]; !exists {
-		data["Error"] = r.URL.Query().Get("err")
+		data["Error"] = errorMessage(r.URL.Query().Get("err"))
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmpl.ExecuteTemplate(w, "layout", data); err != nil {
@@ -463,6 +489,28 @@ func flashMessage(code string) string {
 	}
 }
 
+// errorMessage мапит код ошибки из ?err=... в локализованный текст.
+// Произвольный текст в query не отображается — иначе ссылка вида
+// /settings?err=Ваш+пароль+устарел... стала бы фишинговым вектором.
+func errorMessage(code string) string {
+	switch code {
+	case "telegram_fail":
+		return "Не удалось отправить тестовое сообщение. См. логи сервера."
+	case "import_read_fail":
+		return "Не удалось прочитать файл. Максимум 512 МБ."
+	case "import_no_file":
+		return "Выберите JSON-файл для импорта."
+	case "import_too_big":
+		return "Файл слишком большой (максимум 512 МБ)."
+	case "scheduler_pause":
+		return "Не удалось приостановить проверки. Повторите попытку."
+	case "import_fail":
+		return "Импорт не удался. См. логи сервера."
+	default:
+		return ""
+	}
+}
+
 func stateLabel(state string) string {
 	return models.StatusLabel(state)
 }
@@ -507,17 +555,6 @@ func statusText(code *int) string {
 		return "—"
 	}
 	return strconv.Itoa(*code)
-}
-
-// urlQuery обрезает сообщение по рунам: текст русский, обрезка по байтам
-// оставляет в строке половину символа.
-func urlQuery(s string) string {
-	const maxRunes = 180
-	if utf8.RuneCountInString(s) > maxRunes {
-		runes := []rune(s)
-		s = string(runes[:maxRunes])
-	}
-	return url.QueryEscape(s)
 }
 
 type statusRecorder struct {

@@ -3,10 +3,7 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"strings"
 	"testing"
-	"unicode/utf8"
 )
 
 func TestSameOriginOnly(t *testing.T) {
@@ -23,7 +20,8 @@ func TestSameOriginOnly(t *testing.T) {
 		{"POST с поддомена", http.MethodPost, map[string]string{"Sec-Fetch-Site": "same-site"}, false},
 		{"POST с чужим Origin", http.MethodPost, map[string]string{"Origin": "https://evil.example"}, false},
 		{"POST со своим Origin", http.MethodPost, map[string]string{"Origin": "http://webchecker.local"}, true},
-		{"POST из curl", http.MethodPost, nil, true},
+		{"POST без заголовков — блокировано", http.MethodPost, nil, false},
+		{"POST из curl с X-Requested-By", http.MethodPost, map[string]string{"X-Requested-By": "cli"}, true},
 	}
 
 	for _, tc := range cases {
@@ -63,17 +61,25 @@ func TestRecoverPanicReturns500(t *testing.T) {
 	}
 }
 
-func TestUrlQueryKeepsRunesIntact(t *testing.T) {
-	// Кириллица занимает 2 байта: обрезка по байтам оставляла половину символа.
-	escaped := urlQuery(strings.Repeat("ф", 200))
-	decoded, err := url.QueryUnescape(escaped)
-	if err != nil {
-		t.Fatalf("unescape failed: %v", err)
+func TestErrorMessageOnlyAllowsKnownCodes(t *testing.T) {
+	cases := map[string]bool{
+		"":                               false,
+		"telegram_fail":                  true,
+		"import_read_fail":               true,
+		"import_no_file":                 true,
+		"import_too_big":                 true,
+		"scheduler_pause":                true,
+		"import_fail":                    true,
+		"<script>alert(1)</script>":      false,
+		"Your+password+expired":          false,
+		"../../etc/passwd":               false,
+		"custom message from attacker":   false,
+		"telegram_fail; drop table ...;": false,
 	}
-	if !utf8.ValidString(decoded) {
-		t.Fatalf("truncated message is not valid utf8: %q", decoded)
-	}
-	if got := utf8.RuneCountInString(decoded); got != 180 {
-		t.Fatalf("want 180 runes, got %d", got)
+	for code, want := range cases {
+		got := errorMessage(code) != ""
+		if got != want {
+			t.Fatalf("errorMessage(%q): got allowed=%v, want %v", code, got, want)
+		}
 	}
 }

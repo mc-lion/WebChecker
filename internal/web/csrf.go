@@ -30,19 +30,23 @@ func safeMethod(method string) bool {
 
 func allowedOrigin(r *http.Request) bool {
 	// Современные браузеры всегда присылают Sec-Fetch-Site.
-	switch r.Header.Get("Sec-Fetch-Site") {
+	fetchSite := r.Header.Get("Sec-Fetch-Site")
+	switch fetchSite {
 	case "same-origin", "none":
 		return true
-	case "":
-		// Заголовка нет — разбираемся по Origin ниже.
-	default:
+	case "same-site", "cross-site":
 		return false
 	}
 
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	if origin == "" || origin == "null" {
-		// Ни Sec-Fetch-Site, ни Origin: это не браузерная форма (curl, скрипт).
-		return true
+		// Нет ни Sec-Fetch-Site, ни Origin.
+		// В браузерной форме Origin всегда есть, значит это curl/скрипт.
+		// Разрешаем только если нет Cookie-подобных заголовков, которые мог бы
+		// автоматически подставить браузер — у нас только Basic Auth.
+		// Чтобы запрос не стал CSRF-вектором, требуем явный заголовок
+		// X-Requested-By, который кросс-сайтовая HTML-форма отправить не может.
+		return strings.TrimSpace(r.Header.Get("X-Requested-By")) != ""
 	}
 	parsed, err := url.Parse(origin)
 	if err != nil || parsed.Host == "" {
