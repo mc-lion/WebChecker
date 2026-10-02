@@ -20,25 +20,21 @@
     <span>{{if .Monitor.Enabled}}Включён{{else}}Выключен{{end}}</span>
 </div>
 
-<div class="stats-grid">
+<nav class="range-pills" aria-label="Интервал статистики">
+    {{range .Ranges}}
+        <a href="/monitors/{{$.Monitor.ID}}?range={{.Code}}" class="{{if eq .Code $.Range.Code}}is-active{{end}}">{{.Short}}</a>
+    {{end}}
+</nav>
+
+<div class="stats-grid stats-grid-one">
     <article class="card">
-        <h2>24 часа</h2>
+        <h2>{{.Range.Title}}</h2>
         <dl>
-            <div><dt>Проверок</dt><dd>{{.Stats.Last24h.Total}}</dd></div>
-            <div><dt>Uptime</dt><dd>{{printf "%.1f%%" .Stats.Last24h.UptimePct}}</dd></div>
-            <div><dt>Медленных</dt><dd>{{.Stats.Last24h.SlowCount}}</dd></div>
-            <div><dt>Среднее</dt><dd>{{fmtFloat .Stats.Last24h.AvgMS}}</dd></div>
-            <div><dt>Мин / макс</dt><dd>{{fmtMS .Stats.Last24h.MinMS}} / {{fmtMS .Stats.Last24h.MaxMS}}</dd></div>
-        </dl>
-    </article>
-    <article class="card">
-        <h2>7 дней</h2>
-        <dl>
-            <div><dt>Проверок</dt><dd>{{.Stats.Last7d.Total}}</dd></div>
-            <div><dt>Uptime</dt><dd>{{printf "%.1f%%" .Stats.Last7d.UptimePct}}</dd></div>
-            <div><dt>Медленных</dt><dd>{{.Stats.Last7d.SlowCount}}</dd></div>
-            <div><dt>Среднее</dt><dd>{{fmtFloat .Stats.Last7d.AvgMS}}</dd></div>
-            <div><dt>Мин / макс</dt><dd>{{fmtMS .Stats.Last7d.MinMS}} / {{fmtMS .Stats.Last7d.MaxMS}}</dd></div>
+            <div><dt>Проверок</dt><dd>{{.Stats.Total}}</dd></div>
+            <div><dt>Uptime</dt><dd>{{printf "%.1f%%" .Stats.UptimePct}}</dd></div>
+            <div><dt>Медленных</dt><dd>{{.Stats.SlowCount}}</dd></div>
+            <div><dt>Среднее</dt><dd>{{fmtFloat .Stats.AvgMS}}</dd></div>
+            <div><dt>Мин / макс</dt><dd>{{fmtMS .Stats.MinMS}} / {{fmtMS .Stats.MaxMS}}</dd></div>
         </dl>
     </article>
 </div>
@@ -46,7 +42,7 @@
 <article class="card">
     <h2>Время ответа</h2>
     <div class="chart-box">
-        <canvas id="latency-chart" data-src="/monitors/{{.Monitor.ID}}/checks.json"></canvas>
+        <canvas id="latency-chart" data-src="/monitors/{{.Monitor.ID}}/checks.json?range={{.Range.Code}}"></canvas>
     </div>
 </article>
 

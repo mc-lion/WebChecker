@@ -72,6 +72,14 @@ type MonitorStats struct {
 	Last7d  PeriodStats
 }
 
+// CheckBucket — одна корзина графика: среднее время ответа за шаг.
+type CheckBucket struct {
+	At    time.Time
+	AvgMS int
+	OK    bool
+	Count int
+}
+
 func (r DashboardRow) State() string {
 	if !r.Enabled {
 		return "disabled"

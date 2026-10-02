@@ -52,6 +52,14 @@
     .then((points) => {
       const labels = points.map((p) => p.t);
       const values = points.map((p) => p.ms);
+      const okFlags = points.map((p) => p.ok !== false);
+      const pointColors = okFlags.map((ok) => (ok ? "#2563eb" : "#dc2626"));
+      const pointRadius = okFlags.map((ok) => {
+        if (!ok) {
+          return 3;
+        }
+        return labels.length > 80 ? 0 : 2;
+      });
       if (window.Chart) {
         const Chart = window.Chart;
         new Chart(canvas, {
@@ -66,7 +74,10 @@
                 backgroundColor: "rgba(37, 99, 235, 0.12)",
                 fill: true,
                 tension: 0.25,
-                pointRadius: labels.length > 80 ? 0 : 2,
+                spanGaps: true,
+                pointBackgroundColor: pointColors,
+                pointBorderColor: pointColors,
+                pointRadius,
               },
             ],
           },

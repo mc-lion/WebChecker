@@ -377,6 +377,60 @@ func (s *Store) LastChecks(ctx context.Context, monitorIDs []int64) (map[int64]*
 	return out, rows.Err()
 }
 
+// PeriodStats считает агрегаты за последние hours часов.
+func (s *Store) PeriodStats(ctx context.Context, monitorID int64, hours int) (models.PeriodStats, error) {
+	if hours < 1 {
+		hours = 1
+	}
+	return s.periodStats(ctx, monitorID, time.Duration(hours)*time.Hour)
+}
+
+// ListCheckBuckets сжимает проверки в корзины по bucketSec секунд.
+// Пустые корзины не возвращаются.
+func (s *Store) ListCheckBuckets(ctx context.Context, monitorID int64, hours, bucketSec int) ([]models.CheckBucket, error) {
+	if hours < 1 {
+		hours = 1
+	}
+	if bucketSec < 1 {
+		bucketSec = 60
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(checked_at) / ?) * ?) AS bucket,
+			AVG(response_ms),
+			COALESCE(SUM(ok), 0),
+			COUNT(*)
+		FROM checks
+		WHERE monitor_id = ? AND checked_at >= UTC_TIMESTAMP(3) - INTERVAL ? HOUR
+		GROUP BY bucket
+		ORDER BY bucket
+	`, bucketSec, bucketSec, monitorID, hours)
+	if err != nil {
+		return nil, fmt.Errorf("list check buckets: %w", err)
+	}
+	defer rows.Close()
+
+	var out []models.CheckBucket
+	for rows.Next() {
+		var at time.Time
+		var avg sql.NullFloat64
+		var okCount, total sql.NullInt64
+		if err := rows.Scan(&at, &avg, &okCount, &total); err != nil {
+			return nil, fmt.Errorf("scan check bucket: %w", err)
+		}
+		b := models.CheckBucket{
+			At:    at.UTC(),
+			Count: int(total.Int64),
+			OK:    total.Valid && okCount.Valid && okCount.Int64 == total.Int64 && total.Int64 > 0,
+		}
+		if avg.Valid {
+			b.AvgMS = int(avg.Float64 + 0.5)
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) periodStats(ctx context.Context, monitorID int64, window time.Duration) (models.PeriodStats, error) {
 	hours := int(window.Hours())
 	if hours < 1 {

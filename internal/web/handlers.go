@@ -252,7 +252,8 @@ func (s *Server) show(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, "get monitor", err)
 		return
 	}
-	stats, err := s.store.MonitorStats(r.Context(), id)
+	rng := parseStatsRange(r.URL.Query().Get("range"))
+	stats, err := s.store.PeriodStats(r.Context(), id, rng.Hours)
 	if err != nil {
 		s.serverError(w, "monitor stats", err)
 		return
@@ -267,6 +268,8 @@ func (s *Server) show(w http.ResponseWriter, r *http.Request) {
 		"Active":  "dashboard",
 		"Monitor": mon,
 		"Stats":   stats,
+		"Range":   rng,
+		"Ranges":  statsRanges,
 		"Checks":  checks,
 	})
 }
@@ -285,7 +288,8 @@ func (s *Server) checksJSON(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, "get monitor", err)
 		return
 	}
-	checks, err := s.store.ListRecentChecks(r.Context(), id, 200)
+	rng := parseStatsRange(r.URL.Query().Get("range"))
+	buckets, err := s.store.ListCheckBuckets(r.Context(), id, rng.Hours, rng.BucketSec)
 	if err != nil {
 		s.serverError(w, "checks json", err)
 		return
@@ -295,15 +299,16 @@ func (s *Server) checksJSON(w http.ResponseWriter, r *http.Request) {
 		T  string `json:"t"`
 		MS int    `json:"ms"`
 		OK bool   `json:"ok"`
+		N  int    `json:"n"`
 	}
-	points := make([]point, 0, len(checks))
-	for i := len(checks) - 1; i >= 0; i-- {
-		c := checks[i]
+	layout := rng.chartTimeLayout()
+	points := make([]point, 0, len(buckets))
+	for _, b := range buckets {
 		points = append(points, point{
-			// С датой: на длинной истории одно время суток встречается много раз.
-			T:  c.CheckedAt.Local().Format("02.01 15:04:05"),
-			MS: c.ResponseMS,
-			OK: c.OK,
+			T:  b.At.Local().Format(layout),
+			MS: b.AvgMS,
+			OK: b.OK,
+			N:  b.Count,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
