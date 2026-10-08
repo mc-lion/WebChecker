@@ -26,6 +26,44 @@ func TestMonitorFromFormValid(t *testing.T) {
 	}
 }
 
+func TestMonitorFromFormUserAgentID(t *testing.T) {
+	values := url.Values{
+		"name":                   {"API"},
+		"url":                    {"https://example.com/health"},
+		"interval_seconds":       {"30"},
+		"retry_interval_seconds": {"10"},
+		"expected_status":        {"200"},
+		"timeout_seconds":        {"5"},
+		"slow_threshold_ms":      {"1500"},
+		"fail_threshold":         {"3"},
+		"user_agent_id":          {"4"},
+	}
+	m, err := monitorFromForm(values, defaultMonitor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.UserAgentID != 4 {
+		t.Fatalf("UserAgentID = %d, want 4", m.UserAgentID)
+	}
+}
+
+func TestMonitorFromFormRejectsBadUserAgentID(t *testing.T) {
+	values := url.Values{
+		"name":                   {"API"},
+		"url":                    {"https://example.com/health"},
+		"interval_seconds":       {"30"},
+		"retry_interval_seconds": {"10"},
+		"expected_status":        {"200"},
+		"timeout_seconds":        {"5"},
+		"slow_threshold_ms":      {"1500"},
+		"fail_threshold":         {"3"},
+		"user_agent_id":          {"nope"},
+	}
+	if _, err := monitorFromForm(values, defaultMonitor()); err == nil {
+		t.Fatal("expected user agent error")
+	}
+}
+
 func TestMonitorFromFormRejectsFTP(t *testing.T) {
 	values := url.Values{
 		"name":                   {"Bad"},

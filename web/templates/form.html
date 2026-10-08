@@ -16,6 +16,15 @@
         URL
         <input type="url" name="url" value="{{.Monitor.URL}}" required maxlength="2048" placeholder="https://example.com/health">
     </label>
+    <label>
+        User-Agent
+        <select name="user_agent_id" required>
+            {{range .UserAgents}}
+            <option value="{{.ID}}" {{if eq .ID $.Monitor.UserAgentID}}selected{{end}}>{{.Name}}{{if .IsDefault}} — по умолчанию{{end}}</option>
+            {{end}}
+        </select>
+        <span class="muted tiny">Список задаётся в Настройках. Браузерный UA нужен сайтам, которые иначе уводят на мобильную версию.</span>
+    </label>
     <div class="grid-2">
         <label>
             Интервал, сек

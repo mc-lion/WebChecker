@@ -91,6 +91,8 @@ func TestErrorMessageOnlyAllowsKnownCodes(t *testing.T) {
 		"import_too_big":                 true,
 		"scheduler_pause":                true,
 		"import_fail":                    true,
+		"ua_invalid":                     true,
+		"ua_last":                        true,
 		"<script>alert(1)</script>":      false,
 		"Your+password+expired":          false,
 		"../../etc/passwd":               false,

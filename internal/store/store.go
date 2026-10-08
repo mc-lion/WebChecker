@@ -15,6 +15,12 @@ import (
 )
 
 var ErrNotFound = errors.New("not found")
+var ErrLastUserAgent = errors.New("cannot delete the last user agent")
+
+const monitorSelect = `m.id, m.name, m.url, m.interval_seconds, m.retry_interval_seconds, m.expected_status, m.timeout_seconds,
+		       m.slow_threshold_ms, m.fail_threshold, m.enabled, m.created_at, m.updated_at, m.user_agent_id,
+		       COALESCE(ua.value, ''), COALESCE(ua.name, '')`
+const monitorFrom = `monitors m LEFT JOIN user_agents ua ON ua.id = m.user_agent_id`
 
 type Store struct {
 	db *sql.DB
@@ -30,10 +36,9 @@ func (s *Store) Ping(ctx context.Context) error {
 
 func (s *Store) ListMonitors(ctx context.Context) ([]models.Monitor, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
-		       slow_threshold_ms, fail_threshold, enabled, created_at, updated_at
-		FROM monitors
-		ORDER BY name
+		SELECT `+monitorSelect+`
+		FROM `+monitorFrom+`
+		ORDER BY m.name
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list monitors: %w", err)
@@ -53,11 +58,10 @@ func (s *Store) ListMonitors(ctx context.Context) ([]models.Monitor, error) {
 
 func (s *Store) ListEnabledMonitors(ctx context.Context) ([]models.Monitor, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
-		       slow_threshold_ms, fail_threshold, enabled, created_at, updated_at
-		FROM monitors
-		WHERE enabled = 1
-		ORDER BY id
+		SELECT `+monitorSelect+`
+		FROM `+monitorFrom+`
+		WHERE m.enabled = 1
+		ORDER BY m.id
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list enabled monitors: %w", err)
@@ -77,10 +81,9 @@ func (s *Store) ListEnabledMonitors(ctx context.Context) ([]models.Monitor, erro
 
 func (s *Store) GetMonitor(ctx context.Context, id int64) (models.Monitor, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
-		       slow_threshold_ms, fail_threshold, enabled, created_at, updated_at
-		FROM monitors
-		WHERE id = ?
+		SELECT `+monitorSelect+`
+		FROM `+monitorFrom+`
+		WHERE m.id = ?
 	`, id)
 	m, err := scanMonitor(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -93,11 +96,15 @@ func (s *Store) GetMonitor(ctx context.Context, id int64) (models.Monitor, error
 }
 
 func (s *Store) CreateMonitor(ctx context.Context, m models.Monitor) (int64, error) {
+	uaID, err := s.resolveUserAgentID(ctx, m.UserAgentID)
+	if err != nil {
+		return 0, err
+	}
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO monitors (name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
-		                      slow_threshold_ms, fail_threshold, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled))
+		                      slow_threshold_ms, fail_threshold, user_agent_id, enabled)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, uaID, boolToInt(m.Enabled))
 	if err != nil {
 		return 0, fmt.Errorf("create monitor: %w", err)
 	}
@@ -109,12 +116,16 @@ func (s *Store) CreateMonitor(ctx context.Context, m models.Monitor) (int64, err
 }
 
 func (s *Store) UpdateMonitor(ctx context.Context, m models.Monitor) error {
+	uaID, err := s.resolveUserAgentID(ctx, m.UserAgentID)
+	if err != nil {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE monitors
 		SET name = ?, url = ?, interval_seconds = ?, retry_interval_seconds = ?, expected_status = ?, timeout_seconds = ?,
-		    slow_threshold_ms = ?, fail_threshold = ?, enabled = ?
+		    slow_threshold_ms = ?, fail_threshold = ?, user_agent_id = ?, enabled = ?
 		WHERE id = ?
-	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), m.ID)
+	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, uaID, boolToInt(m.Enabled), m.ID)
 	if err != nil {
 		return fmt.Errorf("update monitor: %w", err)
 	}
@@ -556,7 +567,12 @@ func (s *Store) StreamDump(ctx context.Context, w io.Writer, includeChecks bool)
 		return err
 	}
 
-	writeRaw(`,"monitors":[`)
+	writeRaw(`,"user_agents":[`)
+	if err := s.streamUserAgents(ctx, bw, enc); err != nil {
+		return err
+	}
+
+	writeRaw(`],"monitors":[`)
 	if err := s.streamMonitors(ctx, bw, enc); err != nil {
 		return err
 	}
@@ -579,10 +595,9 @@ func (s *Store) StreamDump(ctx context.Context, w io.Writer, includeChecks bool)
 
 func (s *Store) streamMonitors(ctx context.Context, bw *bufio.Writer, enc *json.Encoder) error {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
-		       slow_threshold_ms, fail_threshold, enabled, created_at, updated_at
-		FROM monitors
-		ORDER BY id
+		SELECT `+monitorSelect+`
+		FROM `+monitorFrom+`
+		ORDER BY m.id
 	`)
 	if err != nil {
 		return fmt.Errorf("export monitors: %w", err)
@@ -679,6 +694,48 @@ func (s *Store) ImportStream(ctx context.Context, src io.ReadSeeker) error {
 		return fmt.Errorf("clear monitors: %w", err)
 	}
 
+	uaIDs := make(map[int64]struct{})
+	importedUA := false
+	var maxUAID int64
+
+	if _, err := src.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind dump: %w", err)
+	}
+	err = walkDumpObject(src, map[string]dumpHandler{
+		"user_agents": func(dec *json.Decoder) error {
+			importedUA = true
+			if _, err := tx.ExecContext(ctx, `DELETE FROM user_agents`); err != nil {
+				return fmt.Errorf("clear user agents: %w", err)
+			}
+			return eachArrayElement(dec, func() error {
+				var ua models.UserAgent
+				if err := dec.Decode(&ua); err != nil {
+					return errInvalidDump
+				}
+				newID, err := insertUserAgentTx(ctx, tx, ua)
+				if err != nil {
+					return err
+				}
+				uaIDs[newID] = struct{}{}
+				if newID > maxUAID {
+					maxUAID = newID
+				}
+				return nil
+			})
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if !importedUA || len(uaIDs) == 0 {
+		if err := seedDefaultUserAgentsTx(ctx, tx); err != nil {
+			return err
+		}
+		if err := loadUserAgentIDsTx(ctx, tx, uaIDs); err != nil {
+			return err
+		}
+	}
+
 	idMap := make(map[int64]int64)
 	monitorIDs := make(map[int64]struct{})
 	dumpIDs := make(map[int64]struct{})
@@ -696,6 +753,11 @@ func (s *Store) ImportStream(ctx context.Context, src io.ReadSeeker) error {
 				}
 				if strings.TrimSpace(m.Name) == "" || strings.TrimSpace(m.URL) == "" {
 					return fmt.Errorf("у каждого монитора должны быть имя и URL")
+				}
+				if m.UserAgentID != 0 {
+					if _, ok := uaIDs[m.UserAgentID]; !ok {
+						m.UserAgentID = 0
+					}
 				}
 				if m.ID > 0 {
 					if _, dup := dumpIDs[m.ID]; dup {
@@ -783,6 +845,9 @@ func (s *Store) ImportStream(ctx context.Context, src io.ReadSeeker) error {
 	}
 	_ = resetAutoIncrement(ctx, s.db, "monitors", maxMonitorID)
 	_ = resetAutoIncrement(ctx, s.db, "checks", maxCheckID)
+	if importedUA {
+		_ = resetAutoIncrement(ctx, s.db, "user_agents", maxUAID)
+	}
 	return nil
 }
 
@@ -939,10 +1004,9 @@ func (b *checkBatch) flush(ctx context.Context) error {
 
 func (s *Store) listMonitorsByID(ctx context.Context) ([]models.Monitor, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
-		       slow_threshold_ms, fail_threshold, enabled, created_at, updated_at
-		FROM monitors
-		ORDER BY id
+		SELECT `+monitorSelect+`
+		FROM `+monitorFrom+`
+		ORDER BY m.id
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list monitors by id: %w", err)
@@ -1029,6 +1093,12 @@ func insertMonitorTx(ctx context.Context, tx *sql.Tx, m models.Monitor) (int64, 
 	if m.FailThreshold < 1 {
 		m.FailThreshold = 3
 	}
+	if m.UserAgentID == 0 {
+		var def sql.NullInt64
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM user_agents WHERE is_default = 1 ORDER BY id LIMIT 1`).Scan(&def); err == nil && def.Valid {
+			m.UserAgentID = def.Int64
+		}
+	}
 	created, updated := m.CreatedAt.UTC(), m.UpdatedAt.UTC()
 	if created.IsZero() {
 		created = time.Now().UTC()
@@ -1040,9 +1110,9 @@ func insertMonitorTx(ctx context.Context, tx *sql.Tx, m models.Monitor) (int64, 
 	if m.ID > 0 {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO monitors (id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
-			                      slow_threshold_ms, fail_threshold, enabled, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, m.ID, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), created, updated)
+			                      slow_threshold_ms, fail_threshold, user_agent_id, enabled, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, m.ID, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, nullIfZero(m.UserAgentID), boolToInt(m.Enabled), created, updated)
 		if err != nil {
 			return 0, fmt.Errorf("import monitor %d: %w", m.ID, err)
 		}
@@ -1051,9 +1121,9 @@ func insertMonitorTx(ctx context.Context, tx *sql.Tx, m models.Monitor) (int64, 
 
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO monitors (name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
-		                      slow_threshold_ms, fail_threshold, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.Enabled), created, updated)
+		                      slow_threshold_ms, fail_threshold, user_agent_id, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, nullIfZero(m.UserAgentID), boolToInt(m.Enabled), created, updated)
 	if err != nil {
 		return 0, fmt.Errorf("import monitor: %w", err)
 	}
@@ -1103,7 +1173,7 @@ func insertAlertStateTx(ctx context.Context, tx *sql.Tx, state models.AlertState
 func resetAutoIncrement(ctx context.Context, exec interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }, table string, maxID int64) error {
-	if table != "monitors" && table != "checks" {
+	if table != "monitors" && table != "checks" && table != "user_agents" {
 		return fmt.Errorf("unknown table %s", table)
 	}
 	if maxID < 1 {
@@ -1142,14 +1212,18 @@ type scanner interface {
 func scanMonitor(sc scanner) (models.Monitor, error) {
 	var m models.Monitor
 	var enabled int
+	var uaID sql.NullInt64
 	err := sc.Scan(
 		&m.ID, &m.Name, &m.URL, &m.IntervalSeconds, &m.RetryIntervalSeconds, &m.ExpectedStatus, &m.TimeoutSeconds,
-		&m.SlowThresholdMS, &m.FailThreshold, &enabled, &m.CreatedAt, &m.UpdatedAt,
+		&m.SlowThresholdMS, &m.FailThreshold, &enabled, &m.CreatedAt, &m.UpdatedAt, &uaID, &m.UserAgent, &m.UserAgentName,
 	)
 	if err != nil {
 		return models.Monitor{}, err
 	}
 	m.Enabled = enabled == 1
+	if uaID.Valid {
+		m.UserAgentID = uaID.Int64
+	}
 	m.CreatedAt = m.CreatedAt.UTC()
 	m.UpdatedAt = m.UpdatedAt.UTC()
 	return m, nil
@@ -1189,4 +1263,11 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+func nullIfZero(n int64) any {
+	if n == 0 {
+		return nil
+	}
+	return n
 }

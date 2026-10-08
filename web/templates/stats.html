@@ -18,6 +18,7 @@
     <span>Медленный ответ: {{.Monitor.SlowThresholdMS}} мс</span>
     <span>Алерт после: {{.Monitor.FailThreshold}} проблем</span>
     <span>{{if .Monitor.Enabled}}Включён{{else}}Выключен{{end}}</span>
+    {{if .Monitor.UserAgentName}}<span>User-Agent: {{.Monitor.UserAgentName}}</span>{{end}}
 </div>
 
 <nav class="range-pills" aria-label="Интервал статистики">

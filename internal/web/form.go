@@ -66,6 +66,14 @@ func monitorFromForm(values url.Values, existing models.Monitor) (models.Monitor
 	if err != nil {
 		return m, err
 	}
+	rawUA := strings.TrimSpace(values.Get("user_agent_id"))
+	if rawUA != "" {
+		uaID, err := strconv.ParseInt(rawUA, 10, 64)
+		if err != nil || uaID < 1 {
+			return m, fmt.Errorf("выберите User-Agent")
+		}
+		m.UserAgentID = uaID
+	}
 
 	if m.Name == "" {
 		return m, fmt.Errorf("укажите имя")

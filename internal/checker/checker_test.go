@@ -118,6 +118,51 @@ func TestIsSlowThresholdInclusive(t *testing.T) {
 	}
 }
 
+func TestCheckSendsConfiguredUserAgent(t *testing.T) {
+	got := ""
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("User-Agent")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+
+	res := New().Check(context.Background(), models.Monitor{
+		URL:             ts.URL,
+		ExpectedStatus:  200,
+		TimeoutSeconds:  2,
+		SlowThresholdMS: 5000,
+		UserAgent:       "webChecker/1.0",
+	})
+	if !res.OK {
+		t.Fatalf("expected ok, got %+v", res)
+	}
+	if got != "webChecker/1.0" {
+		t.Fatalf("User-Agent = %q, want webChecker/1.0", got)
+	}
+}
+
+func TestCheckFallsBackToBrowserUserAgent(t *testing.T) {
+	got := ""
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("User-Agent")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+
+	res := New().Check(context.Background(), models.Monitor{
+		URL:             ts.URL,
+		ExpectedStatus:  200,
+		TimeoutSeconds:  2,
+		SlowThresholdMS: 5000,
+	})
+	if !res.OK {
+		t.Fatalf("expected ok, got %+v", res)
+	}
+	if got != models.DefaultBrowserUA {
+		t.Fatalf("User-Agent = %q, want browser default", got)
+	}
+}
+
 func TestCheckTimeoutMarkedSlow(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(1500 * time.Millisecond)

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"syscall"
 	"time"
 
@@ -94,7 +95,11 @@ func (c *Checker) Check(ctx context.Context, mon models.Monitor) models.Check {
 		result.ErrorText = err.Error()
 		return result
 	}
-	req.Header.Set("User-Agent", "webChecker/1.0")
+	ua := strings.TrimSpace(mon.UserAgent)
+	if ua == "" {
+		ua = models.DefaultBrowserUA
+	}
+	req.Header.Set("User-Agent", ua)
 	req.Header.Set("Accept", "*/*")
 
 	start := time.Now()

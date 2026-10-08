@@ -38,6 +38,49 @@
 </div>
 
 <article class="card">
+    <h2>User-Agent</h2>
+    <p class="muted">Строка, которую checker подставляет в заголовок запроса. Для нового монитора используется UA «по умолчанию». На части сайтов бот-строка вроде <code>webChecker/1.0</code> вызывает редирект на мобильную версию.</p>
+    {{if .UserAgents}}
+    <ul class="ua-list">
+        {{range .UserAgents}}
+        <li class="ua-item">
+            <form method="post" action="/settings/user-agents/{{.ID}}" class="ua-edit">
+                <input type="text" name="name" value="{{.Name}}" required maxlength="100" aria-label="Название">
+                <input type="text" name="value" value="{{.Value}}" required maxlength="512" aria-label="User-Agent">
+                <div class="ua-item-actions">
+                    {{if .IsDefault}}<span class="ua-default">по умолчанию</span>{{end}}
+                    <button type="submit" class="btn btn-small">Сохранить</button>
+                </div>
+            </form>
+            <div class="ua-item-actions">
+                {{if not .IsDefault}}
+                <form method="post" action="/settings/user-agents/{{.ID}}/default">
+                    <button type="submit" class="btn btn-small">Сделать основным</button>
+                </form>
+                {{end}}
+                <form method="post" action="/settings/user-agents/{{.ID}}/delete" data-confirm="Удалить User-Agent «{{.Name}}»? Мониторы перейдут на основной.">
+                    <button type="submit" class="btn btn-small btn-danger">Удалить</button>
+                </form>
+            </div>
+        </li>
+        {{end}}
+    </ul>
+    {{end}}
+    <form method="post" action="/settings/user-agents" class="ua-add">
+        <h3>Добавить</h3>
+        <label>
+            Название
+            <input type="text" name="name" required maxlength="100" placeholder="Например, Chrome (Windows)">
+        </label>
+        <label>
+            Строка User-Agent
+            <input type="text" name="value" required maxlength="512" placeholder="Mozilla/5.0 ...">
+        </label>
+        <button type="submit" class="btn btn-primary">Добавить</button>
+    </form>
+</article>
+
+<article class="card">
     <h2>Экспорт и импорт</h2>
     <p class="muted">Сохраните мониторы, историю проверок и состояния алертов в JSON — или восстановите их из файла. Импорт полностью заменяет текущие данные и на время работы приостанавливает проверки.</p>
     <div class="form-actions">

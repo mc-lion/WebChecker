@@ -72,6 +72,10 @@ func (s *Server) Handler() http.Handler {
 	protected.Handle("POST /monitors/{id}/toggle", shortPost(s.toggle))
 	protected.Handle("GET /settings", short(s.settings))
 	protected.Handle("POST /settings/telegram-test", shortPost(s.telegramTest))
+	protected.Handle("POST /settings/user-agents", shortPost(s.createUserAgent))
+	protected.Handle("POST /settings/user-agents/{id}", shortPost(s.updateUserAgent))
+	protected.Handle("POST /settings/user-agents/{id}/delete", shortPost(s.deleteUserAgent))
+	protected.Handle("POST /settings/user-agents/{id}/default", shortPost(s.defaultUserAgent))
 	// Export/import могут выполняться минутами на крупных дампах, им короткий
 	// TimeoutHandler не подходит; MaxBytesReader на import выставляется внутри.
 	protected.HandleFunc("GET /settings/export", s.exportDump)
@@ -107,12 +111,19 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) newForm(w http.ResponseWriter, r *http.Request) {
+	uas, err := s.store.ListUserAgents(r.Context())
+	if err != nil {
+		s.serverError(w, "list user agents", err)
+		return
+	}
+	mon := withDefaultUserAgent(defaultMonitor(), uas)
 	s.render(w, r, "form.html", map[string]any{
-		"Title":   "Новый URL",
-		"Active":  "dashboard",
-		"Monitor": defaultMonitor(),
-		"Action":  "/monitors",
-		"IsNew":   true,
+		"Title":      "Новый URL",
+		"Active":     "dashboard",
+		"Monitor":    mon,
+		"UserAgents": uas,
+		"Action":     "/monitors",
+		"IsNew":      true,
 	})
 }
 
@@ -131,12 +142,18 @@ func (s *Server) editForm(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, "get monitor", err)
 		return
 	}
+	uas, err := s.store.ListUserAgents(r.Context())
+	if err != nil {
+		s.serverError(w, "list user agents", err)
+		return
+	}
 	s.render(w, r, "form.html", map[string]any{
-		"Title":   "Редактирование",
-		"Active":  "dashboard",
-		"Monitor": mon,
-		"Action":  fmt.Sprintf("/monitors/%d", mon.ID),
-		"IsNew":   false,
+		"Title":      "Редактирование",
+		"Active":     "dashboard",
+		"Monitor":    mon,
+		"UserAgents": uas,
+		"Action":     fmt.Sprintf("/monitors/%d", mon.ID),
+		"IsNew":      false,
 	})
 }
 
@@ -147,14 +164,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	mon, err := monitorFromForm(r.PostForm, defaultMonitor())
 	if err != nil {
-		s.render(w, r, "form.html", map[string]any{
-			"Title":   "Новый URL",
-			"Active":  "dashboard",
-			"Monitor": mon,
-			"Action":  "/monitors",
-			"IsNew":   true,
-			"Error":   err.Error(),
-		})
+		s.renderMonitorFormError(w, r, mon, "/monitors", true, err.Error())
 		return
 	}
 	if _, err := s.store.CreateMonitor(r.Context(), mon); err != nil {
@@ -186,14 +196,7 @@ func (s *Server) update(w http.ResponseWriter, r *http.Request) {
 	mon, err := monitorFromForm(r.PostForm, existing)
 	mon.ID = id
 	if err != nil {
-		s.render(w, r, "form.html", map[string]any{
-			"Title":   "Редактирование",
-			"Active":  "dashboard",
-			"Monitor": mon,
-			"Action":  fmt.Sprintf("/monitors/%d", id),
-			"IsNew":   false,
-			"Error":   err.Error(),
-		})
+		s.renderMonitorFormError(w, r, mon, fmt.Sprintf("/monitors/%d", id), false, err.Error())
 		return
 	}
 	if err := s.store.UpdateMonitor(r.Context(), mon); err != nil {
@@ -316,6 +319,15 @@ func (s *Server) checksJSON(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
+	var uas []models.UserAgent
+	if s.store != nil {
+		var err error
+		uas, err = s.store.ListUserAgents(r.Context())
+		if err != nil {
+			s.serverError(w, "list user agents", err)
+			return
+		}
+	}
 	s.render(w, r, "settings.html", map[string]any{
 		"Title":              "Настройки",
 		"Active":             "settings",
@@ -325,7 +337,127 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		"RetentionDays":      s.cfg.StatsRetentionDays,
 		"CheckerWorkers":     s.cfg.CheckerWorkers,
 		"BlockPrivateHosts":  s.cfg.BlockPrivateHosts,
+		"UserAgents":         uas,
 	})
+}
+
+func (s *Server) createUserAgent(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "/settings?err=ua_invalid", http.StatusSeeOther)
+		return
+	}
+	ua := models.UserAgent{
+		Name:  r.PostForm.Get("name"),
+		Value: r.PostForm.Get("value"),
+	}
+	if _, err := s.store.CreateUserAgent(r.Context(), ua); err != nil {
+		slog.Error("create user agent", "error", err)
+		http.Redirect(w, r, "/settings?err=ua_invalid", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/settings?msg=ua_created", http.StatusSeeOther)
+}
+
+func (s *Server) updateUserAgent(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "/settings?err=ua_invalid", http.StatusSeeOther)
+		return
+	}
+	ua := models.UserAgent{
+		ID:    id,
+		Name:  r.PostForm.Get("name"),
+		Value: r.PostForm.Get("value"),
+	}
+	if err := s.store.UpdateUserAgent(r.Context(), ua); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		slog.Error("update user agent", "error", err)
+		http.Redirect(w, r, "/settings?err=ua_invalid", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/settings?msg=ua_updated", http.StatusSeeOther)
+}
+
+func (s *Server) deleteUserAgent(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if err := s.store.DeleteUserAgent(r.Context(), id); err != nil {
+		if errors.Is(err, store.ErrLastUserAgent) {
+			http.Redirect(w, r, "/settings?err=ua_last", http.StatusSeeOther)
+			return
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		s.serverError(w, "delete user agent", err)
+		return
+	}
+	http.Redirect(w, r, "/settings?msg=ua_deleted", http.StatusSeeOther)
+}
+
+func (s *Server) defaultUserAgent(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if err := s.store.SetDefaultUserAgent(r.Context(), id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		s.serverError(w, "set default user agent", err)
+		return
+	}
+	http.Redirect(w, r, "/settings?msg=ua_default", http.StatusSeeOther)
+}
+
+func (s *Server) renderMonitorFormError(w http.ResponseWriter, r *http.Request, mon models.Monitor, action string, isNew bool, errText string) {
+	uas, err := s.store.ListUserAgents(r.Context())
+	if err != nil {
+		s.serverError(w, "list user agents", err)
+		return
+	}
+	title := "Редактирование"
+	if isNew {
+		title = "Новый URL"
+	}
+	s.render(w, r, "form.html", map[string]any{
+		"Title":      title,
+		"Active":     "dashboard",
+		"Monitor":    mon,
+		"UserAgents": uas,
+		"Action":     action,
+		"IsNew":      isNew,
+		"Error":      errText,
+	})
+}
+
+func withDefaultUserAgent(mon models.Monitor, uas []models.UserAgent) models.Monitor {
+	if mon.UserAgentID != 0 {
+		return mon
+	}
+	for _, ua := range uas {
+		if ua.IsDefault {
+			mon.UserAgentID = ua.ID
+			return mon
+		}
+	}
+	if len(uas) > 0 {
+		mon.UserAgentID = uas[0].ID
+	}
+	return mon
 }
 
 func (s *Server) telegramTest(w http.ResponseWriter, r *http.Request) {
@@ -489,6 +621,14 @@ func flashMessage(code string) string {
 		return "Тестовое сообщение отправлено"
 	case "imported":
 		return "Данные импортированы"
+	case "ua_created":
+		return "User-Agent добавлен"
+	case "ua_updated":
+		return "User-Agent сохранён"
+	case "ua_deleted":
+		return "User-Agent удалён"
+	case "ua_default":
+		return "User-Agent по умолчанию обновлён"
 	default:
 		return ""
 	}
@@ -511,6 +651,10 @@ func errorMessage(code string) string {
 		return "Не удалось приостановить проверки. Повторите попытку."
 	case "import_fail":
 		return "Импорт не удался. См. логи сервера."
+	case "ua_invalid":
+		return "Проверьте название и строку User-Agent."
+	case "ua_last":
+		return "Нельзя удалить последний User-Agent."
 	default:
 		return ""
 	}

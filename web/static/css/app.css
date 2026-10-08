@@ -200,7 +200,10 @@ h2 { font-size: 16px; }
 
 .form input[type="text"],
 .form input[type="url"],
-.form input[type="number"] {
+.form input[type="number"],
+.form select,
+.ua-item input,
+.ua-add input {
     display: block;
     width: 100%;
     margin-top: 6px;
@@ -228,6 +231,46 @@ h2 { font-size: 16px; }
     display: flex;
     gap: 8px;
     margin-top: 8px;
+}
+
+.ua-list {
+    list-style: none;
+    margin: 12px 0 20px;
+    padding: 0;
+}
+
+.ua-item {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+}
+
+.ua-edit input {
+    width: 100%;
+    margin-bottom: 8px;
+}
+
+.ua-item-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.ua-default {
+    font-size: 12px;
+    color: var(--ok);
+    font-weight: 600;
+}
+
+.ua-add {
+    margin-top: 8px;
+}
+
+.ua-add h3 {
+    font-size: 14px;
+    margin: 0 0 8px;
 }
 
 .import-form {

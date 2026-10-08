@@ -12,9 +12,21 @@ type Monitor struct {
 	TimeoutSeconds       int       `json:"timeout_seconds"`
 	SlowThresholdMS      int       `json:"slow_threshold_ms"`
 	FailThreshold        int       `json:"fail_threshold"`
+	UserAgentID          int64     `json:"user_agent_id,omitempty"`
+	UserAgent            string    `json:"-"`
+	UserAgentName        string    `json:"-"`
 	Enabled              bool      `json:"enabled"`
 	CreatedAt            time.Time `json:"created_at"`
 	UpdatedAt            time.Time `json:"updated_at"`
+}
+
+type UserAgent struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	Value     string    `json:"value"`
+	IsDefault bool      `json:"is_default"`
+	SortOrder int       `json:"sort_order"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
 }
 
 type Check struct {
@@ -39,10 +51,14 @@ type AlertState struct {
 type Dump struct {
 	Version     int          `json:"version"`
 	ExportedAt  time.Time    `json:"exported_at"`
+	UserAgents  []UserAgent  `json:"user_agents,omitempty"`
 	Monitors    []Monitor    `json:"monitors"`
 	Checks      []Check      `json:"checks"`
 	AlertStates []AlertState `json:"alert_states"`
 }
+
+// DefaultBrowserUA — запасной заголовок, если у монитора не выбран User-Agent.
+const DefaultBrowserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 const DumpVersion = 1
 
