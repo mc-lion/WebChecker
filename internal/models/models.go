@@ -29,6 +29,15 @@ type UserAgent struct {
 	CreatedAt time.Time `json:"created_at,omitempty"`
 }
 
+type User struct {
+	ID           int64     `json:"id"`
+	Username     string    `json:"username"`
+	PasswordHash string    `json:"password_hash,omitempty"`
+	Enabled      bool      `json:"enabled"`
+	CreatedAt    time.Time `json:"created_at,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at,omitempty"`
+}
+
 type Check struct {
 	ID         int64     `json:"id"`
 	MonitorID  int64     `json:"monitor_id"`
@@ -51,6 +60,7 @@ type AlertState struct {
 type Dump struct {
 	Version     int          `json:"version"`
 	ExportedAt  time.Time    `json:"exported_at"`
+	Users       []User       `json:"users,omitempty"`
 	UserAgents  []UserAgent  `json:"user_agents,omitempty"`
 	Monitors    []Monitor    `json:"monitors"`
 	Checks      []Check      `json:"checks"`

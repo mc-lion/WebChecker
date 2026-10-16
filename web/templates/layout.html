@@ -8,21 +8,28 @@
     <title>{{if .Title}}{{.Title}} — {{end}}webChecker</title>
     <link rel="stylesheet" href="/static/css/app.css">
 </head>
-<body>
+<body class="{{if .Public}}is-public{{end}}">
+    {{if not .Public}}
     <header class="topbar">
         <a class="brand" href="/">webChecker</a>
         <nav>
             <a href="/" class="{{if eq .Active "dashboard"}}is-active{{end}}">Дашборд</a>
             <a href="/settings" class="{{if eq .Active "settings"}}is-active{{end}}">Настройки</a>
+            <form method="post" action="/logout" class="logout-form">
+                <button type="submit" class="btn btn-small">Выйти</button>
+            </form>
         </nav>
     </header>
+    {{end}}
     <main class="container">
         {{if .Flash}}<div class="banner banner-ok">{{.Flash}}</div>{{end}}
         {{if .Error}}<div class="banner banner-err">{{.Error}}</div>{{end}}
         {{template "content" .}}
     </main>
+    {{if not .Public}}
     <script src="/static/js/chart.umd.min.js"></script>
     <script src="/static/js/app.js"></script>
+    {{end}}
 </body>
 </html>
 {{end}}

@@ -1,0 +1,17 @@
+{{define "content"}}
+<section class="login-box">
+    <h1>Вход</h1>
+    <p class="muted">webChecker</p>
+    <form method="post" action="/login" class="login-form">
+        <label>
+            Логин
+            <input type="text" name="username" required maxlength="64" autocomplete="username" value="{{.Username}}" autofocus>
+        </label>
+        <label>
+            Пароль
+            <input type="password" name="password" required autocomplete="current-password">
+        </label>
+        <button type="submit" class="btn btn-primary">Войти</button>
+    </form>
+</section>
+{{end}}

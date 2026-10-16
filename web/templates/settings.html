@@ -33,9 +33,61 @@
             <div><dt>Воркеры проверок</dt><dd>{{.CheckerWorkers}}</dd></div>
             <div><dt>Внутренние адреса</dt><dd>{{if .BlockPrivateHosts}}запрещены{{else}}разрешены{{end}}</dd></div>
         </dl>
-        <p class="muted">Чтобы сменить логин, пароль или параметры БД, обновите переменные окружения и перезапустите контейнер.</p>
+        <p class="muted">Параметры БД и секреты задаются переменными окружения. Пользователей UI можно заводить ниже.</p>
+        <dl>
+            <div><dt>AUTH_ENV_ALWAYS</dt><dd>{{if .AuthEnvAlways}}включён — учётка из .env принимается всегда{{else}}выключен — .env только пока нет пользователей в БД{{end}}</dd></div>
+        </dl>
     </article>
 </div>
+
+<article class="card">
+    <h2>Пользователи</h2>
+    <p class="muted">Вход в интерфейс. Пока список пуст{{if not .AuthEnvAlways}} (и <code>AUTH_ENV_ALWAYS</code> выключен){{end}}, используется <code>AUTH_USER</code>/<code>AUTH_PASSWORD</code> из окружения. Пароль хранится как bcrypt-хеш.</p>
+    {{if .Users}}
+    <ul class="ua-list">
+        {{range .Users}}
+        <li class="ua-item">
+            <form method="post" action="/settings/users/{{.ID}}" class="ua-edit user-edit">
+                <input type="text" name="username" value="{{.Username}}" required maxlength="64" aria-label="Логин">
+                <input type="password" name="password" maxlength="128" placeholder="Новый пароль (пусто — не менять)" aria-label="Пароль" autocomplete="new-password">
+                <label class="check-inline">
+                    <input type="checkbox" name="enabled" value="1" {{if .Enabled}}checked{{end}}>
+                    активен
+                </label>
+                <div class="ua-item-actions">
+                    <button type="submit" class="btn btn-small">Сохранить</button>
+                </div>
+            </form>
+            <div class="ua-item-actions">
+                {{if ne $.CurrentUserID .ID}}
+                <form method="post" action="/settings/users/{{.ID}}/delete" data-confirm="Удалить пользователя «{{.Username}}»?">
+                    <button type="submit" class="btn btn-small btn-danger">Удалить</button>
+                </form>
+                {{end}}
+            </div>
+        </li>
+        {{end}}
+    </ul>
+    {{else}}
+    <p class="muted">Пользователей в БД нет — вход по учётке из .env.</p>
+    {{end}}
+    <form method="post" action="/settings/users" class="ua-add">
+        <h3>Добавить</h3>
+        <label>
+            Логин
+            <input type="text" name="username" required maxlength="64" autocomplete="off">
+        </label>
+        <label>
+            Пароль
+            <input type="password" name="password" required minlength="8" maxlength="128" autocomplete="new-password">
+        </label>
+        <label class="check-inline">
+            <input type="checkbox" name="enabled" value="1" checked>
+            активен
+        </label>
+        <button type="submit" class="btn btn-primary">Добавить</button>
+    </form>
+</article>
 
 <article class="card">
     <h2>User-Agent</h2>

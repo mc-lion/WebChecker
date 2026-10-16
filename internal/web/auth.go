@@ -1,56 +1,245 @@
 package web
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"errors"
+	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"webchecker/internal/store"
 )
 
-// basicAuth проверяет Basic-учётку в константное время и ограничивает частоту
-// неудачных попыток по IP. Для сравнения используется SHA-256-дайджест, чтобы:
-//   - сравнение всегда шло на 32 байтах (длина пароля не утекает);
-//   - логин сравнивался тем же числом байт, что и пароль (нет timing-утечки
-//     на этапе «не тот ли логин вы прислали»).
-func basicAuth(user, pass string, next http.Handler) http.Handler {
-	wantUser := sha256sum(user)
-	wantPass := sha256sum(pass)
-	limiter := newAuthLimiter(5, 60*time.Second)
+type ctxKey int
 
+const (
+	ctxUserIDKey ctxKey = iota
+	ctxUsernameKey
+	ctxEnvSessionKey
+)
+
+func userIDFromContext(ctx context.Context) (int64, bool) {
+	id, ok := ctx.Value(ctxUserIDKey).(int64)
+	return id, ok && id > 0
+}
+
+func usernameFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(ctxUsernameKey).(string)
+	return s
+}
+
+func isEnvSession(ctx context.Context) bool {
+	v, _ := ctx.Value(ctxEnvSessionKey).(bool)
+	return v
+}
+
+func withSession(ctx context.Context, userID int64, username string, env bool) context.Context {
+	ctx = context.WithValue(ctx, ctxUsernameKey, username)
+	ctx = context.WithValue(ctx, ctxEnvSessionKey, env)
+	if userID > 0 {
+		ctx = context.WithValue(ctx, ctxUserIDKey, userID)
+	}
+	return ctx
+}
+
+// jwtAuth проверяет JWT из cookie или Authorization: Bearer.
+func (s *Server) jwtAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := clientIP(r)
-		if !limiter.allow(ip) {
-			w.Header().Set("Retry-After", "60")
-			w.Header().Set("WWW-Authenticate", `Basic realm="webChecker"`)
-			http.Error(w, "Слишком много неудачных попыток входа. Повторите через минуту.", http.StatusTooManyRequests)
+		raw := extractToken(r)
+		if raw == "" {
+			s.authReject(w, r)
 			return
 		}
-		gotUser, gotPass, ok := r.BasicAuth()
-		gotUserHash := sha256sum(gotUser)
-		gotPassHash := sha256sum(gotPass)
-		userMatch := subtle.ConstantTimeCompare(gotUserHash[:], wantUser[:])
-		passMatch := subtle.ConstantTimeCompare(gotPassHash[:], wantPass[:])
-		if !ok || userMatch&passMatch != 1 {
-			limiter.fail(ip)
-			w.Header().Set("WWW-Authenticate", `Basic realm="webChecker"`)
-			http.Error(w, "Требуется авторизация", http.StatusUnauthorized)
+		claims, err := parseToken(raw, s.cfg.JWTSecret)
+		if err != nil {
+			s.authReject(w, r)
 			return
 		}
-		limiter.success(ip)
-		next.ServeHTTP(w, r)
+
+		if claims.Subject == envSubject {
+			if !s.envAuthAllowed(r.Context()) {
+				s.authReject(w, r)
+				return
+			}
+			ctx := withSession(r.Context(), 0, claims.Username, true)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		id, ok := subjectUserID(claims.Subject)
+		if !ok || s.store == nil {
+			s.authReject(w, r)
+			return
+		}
+		u, err := s.store.GetUser(r.Context(), id)
+		if err != nil || !u.Enabled {
+			s.authReject(w, r)
+			return
+		}
+		ctx := withSession(r.Context(), u.ID, u.Username, false)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (s *Server) envAuthAllowed(ctx context.Context) bool {
+	if s.cfg.AuthEnvAlways {
+		return true
+	}
+	if s.store == nil {
+		return true
+	}
+	n, err := s.store.CountUsers(ctx)
+	if err != nil {
+		slog.Error("count users for env auth", "error", err)
+		return false
+	}
+	return n == 0
+}
+
+func (s *Server) authReject(w http.ResponseWriter, r *http.Request) {
+	if wantsJSON(r) {
+		http.Error(w, "Требуется авторизация", http.StatusUnauthorized)
+		return
+	}
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+func wantsJSON(r *http.Request) bool {
+	if strings.HasSuffix(r.URL.Path, ".json") {
+		return true
+	}
+	accept := r.Header.Get("Accept")
+	return strings.Contains(accept, "application/json") && !strings.Contains(accept, "text/html")
+}
+
+func (s *Server) loginForm(w http.ResponseWriter, r *http.Request) {
+	if extractToken(r) != "" {
+		if claims, err := parseToken(extractToken(r), s.cfg.JWTSecret); err == nil {
+			if claims.Subject == envSubject && s.envAuthAllowed(r.Context()) {
+				http.Redirect(w, r, "/", http.StatusSeeOther)
+				return
+			}
+			if id, ok := subjectUserID(claims.Subject); ok && s.store != nil {
+				if u, err := s.store.GetUser(r.Context(), id); err == nil && u.Enabled {
+					http.Redirect(w, r, "/", http.StatusSeeOther)
+					return
+				}
+			}
+		}
+	}
+	s.render(w, r, "login.html", map[string]any{
+		"Title":  "Вход",
+		"Public": true,
+	})
+}
+
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	if s.loginLimiter != nil && !s.loginLimiter.allow(ip) {
+		w.Header().Set("Retry-After", "60")
+		s.renderStatus(w, r, http.StatusTooManyRequests, "login.html", map[string]any{
+			"Title":  "Вход",
+			"Public": true,
+			"Error":  "Слишком много неудачных попыток входа. Повторите через минуту.",
+		})
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		s.render(w, r, "login.html", map[string]any{
+			"Title":  "Вход",
+			"Public": true,
+			"Error":  "Не удалось прочитать форму.",
+		})
+		return
+	}
+	username := strings.TrimSpace(r.PostForm.Get("username"))
+	password := r.PostForm.Get("password")
+
+	subject, displayName, ok := s.tryLogin(r.Context(), username, password)
+	if !ok {
+		if s.loginLimiter != nil {
+			s.loginLimiter.fail(ip)
+		}
+		// Постоянное время даже при отсутствии пользователя: лишняя задержка
+		// уже есть в bcrypt при DB-пути; для env сравниваем хеши.
+		s.render(w, r, "login.html", map[string]any{
+			"Title":    "Вход",
+			"Public":   true,
+			"Error":    "Неверный логин или пароль.",
+			"Username": username,
+		})
+		return
+	}
+	if s.loginLimiter != nil {
+		s.loginLimiter.success(ip)
+	}
+
+	token, exp, err := issueToken(subject, displayName, s.cfg.JWTSecret, s.cfg.JWTTTL)
+	if err != nil {
+		s.serverError(w, "issue jwt", err)
+		return
+	}
+	setSessionCookie(w, token, exp, s.cfg.EnableHSTS)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) tryLogin(ctx context.Context, username, password string) (subject, displayName string, ok bool) {
+	if username == "" || password == "" {
+		return "", "", false
+	}
+
+	if s.store != nil {
+		u, err := s.store.GetUserByUsername(ctx, username)
+		if err == nil {
+			// Имя есть в БД — только bcrypt, env не подменяет пароль.
+			if !u.Enabled {
+				return "", "", false
+			}
+			if err := store.ComparePassword(u.PasswordHash, password); err != nil {
+				return "", "", false
+			}
+			return strconv.FormatInt(u.ID, 10), u.Username, true
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.Error("login get user", "error", err)
+			return "", "", false
+		}
+	}
+
+	if !s.envAuthAllowed(ctx) {
+		return "", "", false
+	}
+	if !s.matchConfiguredEnv(username, password) {
+		return "", "", false
+	}
+	return envSubject, s.cfg.AuthUser, true
+}
+
+func (s *Server) matchConfiguredEnv(username, password string) bool {
+	wantUser := sha256sum(s.cfg.AuthUser)
+	wantPass := sha256sum(s.cfg.AuthPassword)
+	gotUser := sha256sum(username)
+	gotPass := sha256sum(password)
+	userMatch := subtle.ConstantTimeCompare(gotUser[:], wantUser[:])
+	passMatch := subtle.ConstantTimeCompare(gotPass[:], wantPass[:])
+	return userMatch&passMatch == 1
+}
+
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	clearSessionCookie(w, s.cfg.EnableHSTS)
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
 func sha256sum(s string) [32]byte {
 	return sha256.Sum256([]byte(s))
 }
 
-// clientIP достаёт IP клиента. За reverse-proxy полезно учитывать
-// X-Forwarded-For; но доверять произвольному заголовку опасно — злоумышленник
-// подделает его и обойдёт rate-limit. Поэтому берём только RemoteAddr.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -59,8 +248,7 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// authLimiter — простой in-memory лимитер неудачных попыток Basic Auth.
-// Храним только счётчик + метку времени на IP. При успехе счётчик обнуляется.
+// authLimiter — in-memory лимитер неудачных попыток входа по IP.
 type authLimiter struct {
 	mu       sync.Mutex
 	window   time.Duration
@@ -124,7 +312,6 @@ func (l *authLimiter) success(ip string) {
 	delete(l.attempts, ip)
 }
 
-// gcLocked чистит устаревшие записи. Вызывается под mu.
 func (l *authLimiter) gcLocked() {
 	now := time.Now()
 	if now.Sub(l.lastGC) < l.window {

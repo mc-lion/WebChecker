@@ -357,6 +357,50 @@ code {
     border-radius: 4px;
 }
 
+.logout-form {
+    display: inline;
+    margin: 0;
+}
+
+.check-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14px;
+    white-space: nowrap;
+}
+
+.login-box {
+    max-width: 360px;
+    margin: 64px auto;
+}
+
+.login-box h1 {
+    margin: 0 0 4px;
+}
+
+.login-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 20px;
+}
+
+.login-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 14px;
+}
+
+.user-edit {
+    flex-wrap: wrap;
+}
+
+body.is-public .container {
+    max-width: 480px;
+}
+
 @media (max-width: 800px) {
     .page-head, .stats-grid, .grid-2 { grid-template-columns: 1fr; display: block; }
     .page-head { display: flex; flex-direction: column; }

@@ -9,8 +9,8 @@ import (
 )
 
 // sameOriginOnly отклоняет изменяющие запросы, пришедшие с чужой страницы.
-// Basic Auth сам по себе от CSRF не защищает: браузер подставляет сохранённые
-// учётные данные и в кросс-сайтовый POST.
+// Cookie-сессия сама по себе от CSRF не защищает: браузер отправит cookie
+// и с кросс-сайтового POST.
 func sameOriginOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if safeMethod(r.Method) || allowedOrigin(r) {

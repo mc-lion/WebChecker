@@ -26,8 +26,11 @@ services:
       - "8080:8080"
     environment:
       HTTP_ADDR: ${HTTP_ADDR:-:8080}
-      BASIC_AUTH_USER: ${BASIC_AUTH_USER:-admin}
-      BASIC_AUTH_PASSWORD: ${BASIC_AUTH_PASSWORD:-changeme}
+      AUTH_USER: ${AUTH_USER:-admin}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-changeme}
+      AUTH_ENV_ALWAYS: ${AUTH_ENV_ALWAYS:-false}
+      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-secret-key}
+      JWT_TTL: ${JWT_TTL:-24h}
       MYSQL_HOST: mysql
       MYSQL_PORT: ${MYSQL_PORT:-3306}
       MYSQL_USER: ${MYSQL_USER:-webchecker}

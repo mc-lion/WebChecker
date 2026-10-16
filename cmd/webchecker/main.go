@@ -44,8 +44,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	if len(cfg.BasicAuthPassword) < 10 {
-		slog.Warn("basic auth: пароль короче 10 символов, подвержен brute-force. Задайте BASIC_AUTH_PASSWORD длиннее.")
+	if len(cfg.AuthPassword) < 10 {
+		slog.Warn("auth: AUTH_PASSWORD короче 10 символов, подвержен brute-force. Задайте пароль длиннее.")
 	}
 
 	st := store.New(database)

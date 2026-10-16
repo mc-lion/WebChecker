@@ -18,7 +18,7 @@ flowchart LR
     MySQL[(Контейнер mysql)]
   end
   TG[Telegram Bot API]
-  User -->|Basic Auth порт 8080| App
+  User -->|JWT login порт 8080| App
   App -->|GET| Target
   App --> MySQL
   App -->|sendMessage getUpdates| TG
@@ -106,7 +106,7 @@ webChecker/
 │   ├── scheduler/              тик, пул воркеров, retention
 │   ├── alerter/                антиспам и тексты Telegram-алертов
 │   ├── telegram/               Bot API: sendMessage, getUpdates, команды
-│   └── web/                    маршруты, Basic Auth, формы, шаблоны
+│   └── web/                    маршруты, JWT-auth, формы, шаблоны
 ├── web/
 │   ├── embed.go                //go:embed templates и static
 │   ├── templates/              layout, dashboard, form, stats, settings
@@ -134,13 +134,15 @@ webChecker/
 
 ## HTTP-слой
 
-Сервер — стандартный `net/http.ServeMux` (Go 1.22+). Все страницы, кроме `GET /healthz`, закрыты HTTP Basic Auth. Логин и пароль — из env, сравнение через `crypto/subtle`.
+Сервер — стандартный `net/http.ServeMux` (Go 1.22+). Публичны `GET /healthz`, `GET /static/`, `GET|POST /login`. Остальное — JWT (cookie `webchecker_session` или `Authorization: Bearer`). Учётки: таблица `users` (bcrypt) и/или `AUTH_USER`/`AUTH_PASSWORD` из env (см. `AUTH_ENV_ALWAYS`).
 
-Цепочка middleware снаружи внутрь: `logging` (метод, путь, статус, длительность) → `recoverPanic` (паника превращается в `500`, стек в лог) → `basicAuth` → `sameOriginOnly` (защита изменяющих запросов от CSRF) → маршруты.
+Цепочка middleware снаружи внутрь: `logging` → `recoverPanic` → `securityHeaders` → маршруты; на protected — `jwtAuth` → `sameOriginOnly` (CSRF).
 
 | Метод | Путь | Назначение |
 | --- | --- | --- |
 | GET | `/healthz` | Готовность: ping MySQL, без auth |
+| GET/POST | `/login` | Форма входа / выдача JWT |
+| POST | `/logout` | Сброс cookie |
 | GET | `/` | Дашборд мониторов, автообновление 30 с |
 | GET | `/monitors/new` | Форма нового URL |
 | POST | `/monitors` | Создание |
@@ -150,11 +152,14 @@ webChecker/
 | POST | `/monitors/{id}` | Сохранение |
 | POST | `/monitors/{id}/delete` | Удаление |
 | POST | `/monitors/{id}/toggle` | Вкл/выкл |
-| GET | `/settings` | Telegram, retention, экспорт/импорт |
+| GET | `/settings` | Telegram, пользователи, UA, retention, экспорт/импорт |
 | POST | `/settings/telegram-test` | Тестовое сообщение (не зависит от флага алертов) |
+| POST | `/settings/users` | Создать пользователя |
+| POST | `/settings/users/{id}` | Обновить пользователя |
+| POST | `/settings/users/{id}/delete` | Удалить пользователя |
 | GET | `/settings/export` | JSON-дамп БД потоком; `?checks=0` — без истории |
 | POST | `/settings/import` | Замена данных из JSON (планировщик на паузе) |
-| GET | `/static/` | CSS и JS из embed |
+| GET | `/static/` | CSS и JS из embed (без auth) |
 
 Формы — обычный POST и redirect. JavaScript нужен для графика Chart.js и `confirm` при удалении/импорте.
 
@@ -164,6 +169,7 @@ webChecker/
 
 - стандартная библиотека Go (`net/http`, `html/template`, `database/sql`, `embed`);
 - `github.com/go-sql-driver/mysql`;
+- `github.com/golang-jwt/jwt/v5`, `golang.org/x/crypto/bcrypt`;
 - Telegram — сырой HTTPS к `api.telegram.org`, без SDK.
 
 Время в БД хранится и сравнивается как UTC (`parseTime=true&loc=UTC`). Отображение в UI и в боте — локальное, в Docker задаётся `TZ` (по умолчанию `Europe/Moscow`).

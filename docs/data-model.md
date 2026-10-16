@@ -1,6 +1,6 @@
 # Модель данных
 
-Данные приложения лежат в MySQL. Секреты Telegram и пароли в таблицы не пишутся — только в переменные окружения.
+Данные приложения лежат в MySQL. Секреты Telegram и `AUTH_*` / `JWT_SECRET` в таблицы не пишутся — только в переменные окружения. Пароли пользователей UI хранятся как bcrypt-хеши в `users`.
 
 ## Обзор связей
 
@@ -8,7 +8,17 @@
 erDiagram
   monitors ||--o{ checks : "monitor_id"
   monitors ||--o| alert_states : "monitor_id"
+  users ||--|| users : "id PK"
   schema_migrations ||--|| schema_migrations : "version PK"
+
+  users {
+    bigint id PK
+    varchar username
+    varchar password_hash
+    tinyint enabled
+    datetime created_at
+    datetime updated_at
+  }
 
   monitors {
     bigint id PK
@@ -46,6 +56,20 @@ erDiagram
 ```
 
 Удаление монитора каскадом удаляет его `checks` и `alert_states`.
+
+## Таблица `users`
+
+Учётки web UI. Логин по bcrypt; JWT в cookie или Bearer.
+
+| Поле | Смысл |
+| --- | --- |
+| `id` | Первичный ключ (в JWT как `sub`) |
+| `username` | Уникальный логин, до 64 символов |
+| `password_hash` | bcrypt |
+| `enabled` | Можно ли входить |
+| `created_at` / `updated_at` | Служебные метки |
+
+Пока таблица пуста (и `AUTH_ENV_ALWAYS` не `true`), вход идёт по `AUTH_USER`/`AUTH_PASSWORD` из env. Нельзя удалить или выключить последнего активного пользователя.
 
 ## Таблица `monitors`
 
@@ -138,6 +162,8 @@ DDL в MySQL не откатывается, поэтому сбой на сер�
 {
   "version": 1,
   "exported_at": "2026-09-17T12:00:00Z",
+  "users": [ ],
+  "user_agents": [ ],
   "monitors": [ ],
   "checks": [ ],
   "alert_states": [ ]
@@ -152,7 +178,9 @@ DDL в MySQL не откатывается, поэтому сбой на сер�
 
 | Переменная | Роль |
 | --- | --- |
-| `BASIC_AUTH_*` | Доступ к UI |
+| `AUTH_USER`, `AUTH_PASSWORD` | Env-учётка UI (fallback / always) |
+| `AUTH_ENV_ALWAYS` | Всегда принимать env-учётку (`false` по умолчанию) |
+| `JWT_SECRET`, `JWT_TTL` | Подпись и срок JWT |
 | `MYSQL_*` | Подключение |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Куда писать и откуда принимать команды |
 | `TELEGRAM_ENABLED` | Слать ли алерты down/slow/recovery. Тестовая кнопка работает при заданных токене и chat id даже если флаг выключен |

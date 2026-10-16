@@ -13,19 +13,10 @@ import (
 	"webchecker/internal/telegram"
 )
 
-func newTestServer(t *testing.T) http.Handler {
-	t.Helper()
-	srv, err := New(config.Config{BasicAuthUser: "a", BasicAuthPassword: "b"}, nil, telegram.New(config.Config{}), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return srv.Handler()
-}
-
 func TestVerifySecurityHeadersPresent(t *testing.T) {
-	h := newTestServer(t)
+	srv, h := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
-	req.SetBasicAuth("a", "b")
+	req.AddCookie(envSessionCookie(t, srv.cfg))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -48,12 +39,14 @@ func TestVerifySecurityHeadersPresent(t *testing.T) {
 }
 
 func TestVerifyHSTSOnlyWithFlag(t *testing.T) {
-	srv, err := New(config.Config{BasicAuthUser: "a", BasicAuthPassword: "b", EnableHSTS: true}, nil, telegram.New(config.Config{}), nil)
+	cfg := testAuthConfig()
+	cfg.EnableHSTS = true
+	srv, err := New(cfg, nil, telegram.New(config.Config{}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
-	req.SetBasicAuth("a", "b")
+	req.AddCookie(envSessionCookie(t, cfg))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if hsts := rec.Header().Get("Strict-Transport-Security"); hsts == "" {
@@ -61,27 +54,36 @@ func TestVerifyHSTSOnlyWithFlag(t *testing.T) {
 	}
 }
 
-func TestVerifyRateLimitAfterFiveFailures(t *testing.T) {
-	h := newTestServer(t)
-	// Пять неудач — ещё 401.
-	for i := 0; i < 5; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.RemoteAddr = "203.0.113.5:9999"
-		req.SetBasicAuth("a", "wrong")
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("попытка %d: want 401, got %d", i+1, rec.Code)
-		}
-	}
-	// Шестая — 429.
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "203.0.113.5:9999"
-	req.SetBasicAuth("a", "wrong")
+func postLogin(h http.Handler, user, pass, ip string) *httptest.ResponseRecorder {
+	form := strings.NewReader("username=" + url.QueryEscape(user) + "&password=" + url.QueryEscape(pass))
+	req := httptest.NewRequest(http.MethodPost, "/login", form)
+	req.RemoteAddr = ip
+	req.Host = "webchecker.local"
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://webchecker.local")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestVerifyRateLimitAfterFiveFailures(t *testing.T) {
+	_, h := newTestServer(t)
+	ip := "203.0.113.5:9999"
+	for i := 0; i < 5; i++ {
+		rec := postLogin(h, "admin", "wrong", ip)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("попытка %d: want 200 (форма с ошибкой), got %d", i+1, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "Неверный логин") {
+			t.Fatalf("попытка %d: ожидалась ошибка логина", i+1)
+		}
+	}
+	rec := postLogin(h, "admin", "wrong", ip)
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("после 5 неудач want 429, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Слишком много") {
+		t.Fatalf("ожидали сообщение о rate-limit, body=%s", rec.Body.String())
 	}
 	if rec.Header().Get("Retry-After") == "" {
 		t.Fatal("Retry-After не выставлен")
@@ -89,80 +91,57 @@ func TestVerifyRateLimitAfterFiveFailures(t *testing.T) {
 }
 
 func TestVerifyRateLimitPerIP(t *testing.T) {
-	h := newTestServer(t)
-	// Исчерпываем лимит с одного IP.
+	_, h := newTestServer(t)
 	for i := 0; i < 6; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.RemoteAddr = "10.0.0.1:9999"
-		req.SetBasicAuth("a", "wrong")
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
+		postLogin(h, "admin", "wrong", "10.0.0.1:9999")
 	}
-	// Другой IP — всё ещё доступен.
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "10.0.0.2:9999"
-	req.SetBasicAuth("a", "wrong")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("другой IP не должен быть заблокирован, got %d", rec.Code)
+	rec := postLogin(h, "admin", "wrong", "10.0.0.2:9999")
+	if strings.Contains(rec.Body.String(), "Слишком много") {
+		t.Fatal("другой IP не должен быть заблокирован")
+	}
+	if !strings.Contains(rec.Body.String(), "Неверный логин") {
+		t.Fatalf("ожидали ошибку логина, body=%s", rec.Body.String())
 	}
 }
 
 func TestVerifyAuthSuccessClearsCounter(t *testing.T) {
-	h := newTestServer(t)
+	_, h := newTestServer(t)
+	ip := "10.0.0.3:9999"
 	for i := 0; i < 3; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.RemoteAddr = "10.0.0.3:9999"
-		req.SetBasicAuth("a", "wrong")
-		h.ServeHTTP(httptest.NewRecorder(), req)
+		postLogin(h, "admin", "wrong", ip)
 	}
-	// Успех обнуляет счётчик.
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "10.0.0.3:9999"
-	req.SetBasicAuth("a", "b")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	// Хэндлер / требует store, он nil — упадёт в панику → 500 через recoverPanic.
-	// Нам важен только auth-уровень: не 429.
-	if rec.Code == http.StatusTooManyRequests {
-		t.Fatal("rate-limit не должен сработать на верные учётки")
+	rec := postLogin(h, "admin", "secretpassword", ip)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("успешный login want 303, got %d", rec.Code)
 	}
-	// Теперь снова 3 неудачи — ещё не 429.
 	for i := 0; i < 3; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.RemoteAddr = "10.0.0.3:9999"
-		req.SetBasicAuth("a", "wrong")
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("попытка после сброса %d: want 401, got %d", i+1, rec.Code)
+		rec := postLogin(h, "admin", "wrong", ip)
+		if strings.Contains(rec.Body.String(), "Слишком много") {
+			t.Fatalf("попытка после сброса %d: rate-limit не должен сработать", i+1)
 		}
 	}
 }
 
 func TestVerifyMaxBytesOnPOST(t *testing.T) {
-	h := newTestServer(t)
-	// 128 КБ формы — больше лимита 64 КБ.
+	srv, h := newTestServer(t)
 	payload := "name=" + strings.Repeat("A", 128<<10)
 	req := httptest.NewRequest(http.MethodPost, "/monitors", strings.NewReader(payload))
 	req.Host = "webchecker.local"
-	req.SetBasicAuth("a", "b")
+	req.AddCookie(envSessionCookie(t, srv.cfg))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Origin", "http://webchecker.local")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	// store=nil, но до него не должны дойти — ParseForm упадёт на лимите.
 	if rec.Code != http.StatusBadRequest && rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("ожидали 400 или 413 от MaxBytesReader, got %d", rec.Code)
 	}
 }
 
 func TestVerifyErrorMessageNotReflected(t *testing.T) {
-	h := newTestServer(t)
+	srv, h := newTestServer(t)
 	payload := `<script>alert(1)</script>phishing text`
 	req := httptest.NewRequest(http.MethodGet, "/settings?err="+url.QueryEscape(payload), nil)
-	req.SetBasicAuth("a", "b")
+	req.AddCookie(envSessionCookie(t, srv.cfg))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	body := rec.Body.String()
@@ -175,9 +154,9 @@ func TestVerifyErrorMessageNotReflected(t *testing.T) {
 }
 
 func TestVerifyErrorMessageKnownCodeDisplayed(t *testing.T) {
-	h := newTestServer(t)
+	srv, h := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/settings?err=telegram_fail", nil)
-	req.SetBasicAuth("a", "b")
+	req.AddCookie(envSessionCookie(t, srv.cfg))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if !strings.Contains(rec.Body.String(), "тестовое сообщение") {
@@ -186,11 +165,10 @@ func TestVerifyErrorMessageKnownCodeDisplayed(t *testing.T) {
 }
 
 func TestVerifyCSRFAllowsSameOriginFormPOST(t *testing.T) {
-	h := newTestServer(t)
+	srv, h := newTestServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/monitors/1/delete", nil)
 	req.Host = "webchecker.local"
-	req.SetBasicAuth("a", "b")
-	// Как обычная HTML-форма: без Sec-Fetch-Site и без Origin.
+	req.AddCookie(envSessionCookie(t, srv.cfg))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code == http.StatusForbidden {
@@ -199,10 +177,10 @@ func TestVerifyCSRFAllowsSameOriginFormPOST(t *testing.T) {
 }
 
 func TestVerifyCSRFBlocksCrossSitePOST(t *testing.T) {
-	h := newTestServer(t)
+	srv, h := newTestServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/monitors/1/delete", nil)
 	req.Host = "webchecker.local"
-	req.SetBasicAuth("a", "b")
+	req.AddCookie(envSessionCookie(t, srv.cfg))
 	req.Header.Set("Origin", "https://evil.example")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -211,34 +189,34 @@ func TestVerifyCSRFBlocksCrossSitePOST(t *testing.T) {
 	}
 }
 
-func TestVerifyAuthTimingHashed(t *testing.T) {
-	srv, err := New(config.Config{BasicAuthUser: "admin", BasicAuthPassword: "secret-password-long"}, nil, telegram.New(config.Config{}), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := srv.Handler()
+func TestVerifyLoginTimingHashed(t *testing.T) {
+	_, h := newTestServer(t)
 	measure := func(user, pass, ip string) time.Duration {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.RemoteAddr = ip
-		req.SetBasicAuth(user, pass)
-		rec := httptest.NewRecorder()
 		start := time.Now()
-		h.ServeHTTP(rec, req)
+		postLogin(h, user, pass, ip)
 		return time.Since(start)
 	}
-	// Прогрев.
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 10; i++ {
 		measure("x", "y", "127.0.0.1:1")
 	}
-	// 1 попытка с разных IP, чтобы не триггерить rate-limit.
 	var sumWrongUser, sumWrongPass time.Duration
 	runs := 20
 	for i := 0; i < runs; i++ {
-		sumWrongUser += measure("wrong-user", "secret-password-long", "10.1."+strconv.Itoa(i)+".1:1")
+		sumWrongUser += measure("wrong-user", "secretpassword", "10.1."+strconv.Itoa(i)+".1:1")
 		sumWrongPass += measure("admin", "wrong-pass", "10.2."+strconv.Itoa(i)+".1:1")
 	}
 	avgU := sumWrongUser / time.Duration(runs)
 	avgP := sumWrongPass / time.Duration(runs)
 	t.Logf("ср. wrongUser=%s wrongPass=%s (с хешем должны быть сопоставимы)", avgU, avgP)
-	// Жёсткого assert нет (JIT/GC шумит), только лог для глазами.
+}
+
+func TestJSONAuthRejectsWith401(t *testing.T) {
+	_, h := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/monitors/1/checks.json", nil)
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("JSON want 401, got %d", rec.Code)
+	}
 }

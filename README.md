@@ -7,7 +7,7 @@
 - GET-проверки URL с заданным интервалом, отдельным интервалом повтора после ошибки, ожидаемым HTTP-статусом, таймаутом и порогом долгого ответа
 - При старте проверки разнесены по времени (`id % interval` и последняя запись в БД), чтобы не бить все URL сразу
 - Дашборд, CRUD мониторов, статистика за 24 часа и 7 дней, график времени ответа
-- HTTP Basic Auth (логин и пароль из переменных окружения) и защита изменяющих запросов от CSRF
+- JWT-авторизация (логин-форма, cookie и `Authorization: Bearer`), пользователи в БД и защита изменяющих запросов от CSRF
 - Telegram: одно сообщение после N подряд проблем и отдельное — когда URL снова в норме
 - Команды бота в чате: `list`, `stat`, `stat <id>`
 - Экспорт и импорт данных БД из вкладки «Настройки»
@@ -35,8 +35,11 @@ docker compose up --build
 | Переменная | Описание | По умолчанию |
 | --- | --- | --- |
 | `HTTP_ADDR` | Адрес HTTP-сервера | `:8080` |
-| `BASIC_AUTH_USER` | Логин web UI | обязательно |
-| `BASIC_AUTH_PASSWORD` | Пароль web UI | обязательно |
+| `AUTH_USER` | Логин из .env (fallback, пока нет пользователей в БД, или всегда при `AUTH_ENV_ALWAYS`) | обязательно |
+| `AUTH_PASSWORD` | Пароль из .env (минимум 8 символов) | обязательно |
+| `AUTH_ENV_ALWAYS` | `true` — всегда принимать учётку из .env; иначе только при пустой таблице `users` | `false` |
+| `JWT_SECRET` | Секрет подписи JWT (минимум 32 символа) | обязательно |
+| `JWT_TTL` | Срок жизни токена | `24h` |
 | `MYSQL_HOST` | Хост MySQL | `mysql` |
 | `MYSQL_PORT` | Порт MySQL | `3306` |
 | `MYSQL_USER` | Пользователь MySQL | обязательно |
@@ -86,9 +89,10 @@ docker compose up --build
 
 ## Безопасность
 
-- Basic Auth работает по HTTP: **ставьте webChecker за reverse-proxy с HTTPS** (nginx, caddy, traefik), иначе логин и пароль видны в сети.
-- Пароль должен быть длинным. При `len(BASIC_AUTH_PASSWORD) < 10` сервер пишет предупреждение в лог; при `<4` отказывается стартовать.
-- Rate-limit: 5 неудачных попыток Basic Auth с одного IP за минуту → 429 на одну минуту.
+- JWT и форма входа работают по HTTP: **ставьте webChecker за reverse-proxy с HTTPS**, иначе cookie и пароль видны в сети.
+- `AUTH_PASSWORD` минимум 8 символов; при длине &lt; 10 — предупреждение в лог. `JWT_SECRET` минимум 32 символа.
+- Пока в таблице `users` нет записей (и `AUTH_ENV_ALWAYS` не включён), вход идёт по `AUTH_USER`/`AUTH_PASSWORD`. Пользователей можно завести в «Настройки».
+- Rate-limit: 5 неудачных попыток входа с одного IP за минуту.
 - CSRF-защита: изменяющие запросы с чужого сайта (`Sec-Fetch-Site: cross-site` или чужой `Origin`) отклоняются. Обычные формы из интерфейса и curl проходят.
 - SSRF: `CHECK_BLOCK_PRIVATE_HOSTS=true` по умолчанию блокирует проверки внутренних адресов (loopback, 10/8, 172.16/12, 192.168/16, 169.254/16, cloud metadata). Выключайте только если хотите мониторить внутренние сервисы в доверенной сети.
 - Security headers (`X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Content-Security-Policy`) выставляются на все ответы. HSTS — опционально, через `HTTP_HSTS=true`.
@@ -100,7 +104,8 @@ docker compose up --build
 Нужны Go 1.26 и доступный MySQL.
 
 ```bash
-export BASIC_AUTH_USER=admin BASIC_AUTH_PASSWORD=changeme
+export AUTH_USER=admin AUTH_PASSWORD=changeme
+export JWT_SECRET=change-me-to-a-long-random-secret-key
 export MYSQL_HOST=127.0.0.1 MYSQL_USER=webchecker MYSQL_PASSWORD=webchecker MYSQL_DATABASE=webchecker
 go run ./cmd/webchecker
 ```

@@ -5,20 +5,24 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
-	HTTPAddr           string
-	BasicAuthUser      string
-	BasicAuthPassword  string
-	MySQLHost          string
-	MySQLPort          string
-	MySQLUser          string
-	MySQLPassword      string
-	MySQLDatabase      string
-	TelegramEnabled    bool
-	TelegramBotToken   string
-	TelegramChatID     string
+	HTTPAddr          string
+	AuthUser          string
+	AuthPassword      string
+	AuthEnvAlways     bool
+	JWTSecret         string
+	JWTTTL            time.Duration
+	MySQLHost         string
+	MySQLPort         string
+	MySQLUser         string
+	MySQLPassword     string
+	MySQLDatabase     string
+	TelegramEnabled   bool
+	TelegramBotToken  string
+	TelegramChatID    string
 	TelegramSlowAlerts bool
 	StatsRetentionDays int
 	CheckerWorkers     int
@@ -31,8 +35,9 @@ type Config struct {
 func Load() (Config, error) {
 	cfg := Config{
 		HTTPAddr:           envOr("HTTP_ADDR", ":8080"),
-		BasicAuthUser:      strings.TrimSpace(os.Getenv("BASIC_AUTH_USER")),
-		BasicAuthPassword:  os.Getenv("BASIC_AUTH_PASSWORD"),
+		AuthUser:           strings.TrimSpace(os.Getenv("AUTH_USER")),
+		AuthPassword:       os.Getenv("AUTH_PASSWORD"),
+		JWTSecret:          os.Getenv("JWT_SECRET"),
 		MySQLHost:          envOr("MYSQL_HOST", "mysql"),
 		MySQLPort:          envOr("MYSQL_PORT", "3306"),
 		MySQLUser:          strings.TrimSpace(os.Getenv("MYSQL_USER")),
@@ -45,6 +50,14 @@ func Load() (Config, error) {
 	}
 
 	var err error
+	cfg.AuthEnvAlways, err = envBool("AUTH_ENV_ALWAYS", false)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.JWTTTL, err = envDuration("JWT_TTL", 24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg.TelegramEnabled, err = envBool("TELEGRAM_ENABLED", cfg.TelegramBotToken != "" && cfg.TelegramChatID != "")
 	if err != nil {
 		return Config{}, err
@@ -66,11 +79,20 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	if cfg.BasicAuthUser == "" || cfg.BasicAuthPassword == "" {
-		return Config{}, fmt.Errorf("BASIC_AUTH_USER and BASIC_AUTH_PASSWORD are required")
+	if cfg.AuthUser == "" || cfg.AuthPassword == "" {
+		if os.Getenv("BASIC_AUTH_USER") != "" || os.Getenv("BASIC_AUTH_PASSWORD") != "" {
+			return Config{}, fmt.Errorf("AUTH_USER and AUTH_PASSWORD are required (BASIC_AUTH_* больше не поддерживаются, переименуйте в AUTH_*)")
+		}
+		return Config{}, fmt.Errorf("AUTH_USER and AUTH_PASSWORD are required")
 	}
-	if len(cfg.BasicAuthPassword) < 4 {
-		return Config{}, fmt.Errorf("BASIC_AUTH_PASSWORD too short: minimum 4 characters")
+	if len(cfg.AuthPassword) < 8 {
+		return Config{}, fmt.Errorf("AUTH_PASSWORD too short: minimum 8 characters")
+	}
+	if len(cfg.JWTSecret) < 32 {
+		return Config{}, fmt.Errorf("JWT_SECRET is required and must be at least 32 characters")
+	}
+	if cfg.JWTTTL < time.Minute {
+		return Config{}, fmt.Errorf("JWT_TTL must be at least 1m")
 	}
 	if cfg.MySQLUser == "" || cfg.MySQLDatabase == "" {
 		return Config{}, fmt.Errorf("MYSQL_USER and MYSQL_DATABASE are required")
@@ -129,4 +151,16 @@ func envBool(key string, fallback bool) (bool, error) {
 	default:
 		return false, fmt.Errorf("invalid boolean value for %s: %q", key, raw)
 	}
+}
+
+func envDuration(key string, fallback time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration for %s: %q", key, raw)
+	}
+	return d, nil
 }

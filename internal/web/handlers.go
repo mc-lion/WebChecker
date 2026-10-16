@@ -28,11 +28,12 @@ type Pauser interface {
 }
 
 type Server struct {
-	cfg   config.Config
-	store *store.Store
-	tg    *telegram.Client
-	sched Pauser
-	pages map[string]*template.Template
+	cfg          config.Config
+	store        *store.Store
+	tg           *telegram.Client
+	sched        Pauser
+	pages        map[string]*template.Template
+	loginLimiter *authLimiter
 }
 
 func New(cfg config.Config, st *store.Store, tg *telegram.Client, sched Pauser) (*Server, error) {
@@ -40,7 +41,14 @@ func New(cfg config.Config, st *store.Store, tg *telegram.Client, sched Pauser) 
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, store: st, tg: tg, sched: sched, pages: pages}, nil
+	return &Server{
+		cfg:          cfg,
+		store:        st,
+		tg:           tg,
+		sched:        sched,
+		pages:        pages,
+		loginLimiter: newAuthLimiter(5, 60*time.Second),
+	}, nil
 }
 
 // Жёсткий лимит на тело POST с формой. Формы у нас маленькие (десятки полей,
@@ -60,7 +68,6 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	protected := http.NewServeMux()
-	protected.Handle("GET /static/", staticHandler())
 	protected.Handle("GET /{$}", short(s.dashboard))
 	protected.Handle("GET /monitors/new", short(s.newForm))
 	protected.Handle("POST /monitors", shortPost(s.create))
@@ -76,15 +83,23 @@ func (s *Server) Handler() http.Handler {
 	protected.Handle("POST /settings/user-agents/{id}", shortPost(s.updateUserAgent))
 	protected.Handle("POST /settings/user-agents/{id}/delete", shortPost(s.deleteUserAgent))
 	protected.Handle("POST /settings/user-agents/{id}/default", shortPost(s.defaultUserAgent))
+	protected.Handle("POST /settings/users", shortPost(s.createUser))
+	protected.Handle("POST /settings/users/{id}", shortPost(s.updateUser))
+	protected.Handle("POST /settings/users/{id}/delete", shortPost(s.deleteUser))
+	protected.Handle("POST /logout", shortPost(s.logout))
 	// Export/import могут выполняться минутами на крупных дампах, им короткий
 	// TimeoutHandler не подходит; MaxBytesReader на import выставляется внутри.
 	protected.HandleFunc("GET /settings/export", s.exportDump)
 	protected.HandleFunc("POST /settings/import", s.importDump)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.healthz)
-	mux.Handle("/", basicAuth(s.cfg.BasicAuthUser, s.cfg.BasicAuthPassword, sameOriginOnly(protected)))
-	return logging(recoverPanic(securityHeaders(s.cfg.EnableHSTS, mux)))
+	public := http.NewServeMux()
+	public.HandleFunc("GET /healthz", s.healthz)
+	public.Handle("GET /static/", staticHandler())
+	public.Handle("GET /login", short(s.loginForm))
+	public.Handle("POST /login", sameOriginOnly(shortPost(s.login)))
+	public.Handle("/", s.jwtAuth(sameOriginOnly(protected)))
+
+	return logging(recoverPanic(securityHeaders(s.cfg.EnableHSTS, public)))
 }
 
 // limitBody оборачивает POST-хэндлер, ограничивая тело запроса. ParseForm при
@@ -320,11 +335,17 @@ func (s *Server) checksJSON(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	var uas []models.UserAgent
+	var users []models.User
 	if s.store != nil {
 		var err error
 		uas, err = s.store.ListUserAgents(r.Context())
 		if err != nil {
 			s.serverError(w, "list user agents", err)
+			return
+		}
+		users, err = s.store.ListUsers(r.Context())
+		if err != nil {
+			s.serverError(w, "list users", err)
 			return
 		}
 	}
@@ -337,8 +358,97 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		"RetentionDays":      s.cfg.StatsRetentionDays,
 		"CheckerWorkers":     s.cfg.CheckerWorkers,
 		"BlockPrivateHosts":  s.cfg.BlockPrivateHosts,
+		"AuthEnvAlways":      s.cfg.AuthEnvAlways,
 		"UserAgents":         uas,
+		"Users":              users,
+		"CurrentUserID":      func() int64 { id, _ := userIDFromContext(r.Context()); return id }(),
+		"EnvSession":         isEnvSession(r.Context()),
 	})
+}
+
+func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "/settings?err=user_invalid", http.StatusSeeOther)
+		return
+	}
+	username := r.PostForm.Get("username")
+	password := r.PostForm.Get("password")
+	enabled := r.PostForm.Get("enabled") == "1" || r.PostForm.Get("enabled") == "on"
+	if _, err := s.store.CreateUser(r.Context(), username, password, enabled); err != nil {
+		slog.Error("create user", "error", err)
+		http.Redirect(w, r, "/settings?err="+userErrCode(err), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/settings?msg=user_created", http.StatusSeeOther)
+}
+
+func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "/settings?err=user_invalid", http.StatusSeeOther)
+		return
+	}
+	username := r.PostForm.Get("username")
+	password := r.PostForm.Get("password")
+	enabled := r.PostForm.Get("enabled") == "1" || r.PostForm.Get("enabled") == "on"
+	// Чекбокс: если поля нет — выключен.
+	if _, ok := r.PostForm["enabled"]; !ok {
+		enabled = false
+	}
+	if err := s.store.UpdateUser(r.Context(), id, username, password, enabled); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		slog.Error("update user", "error", err)
+		http.Redirect(w, r, "/settings?err="+userErrCode(err), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/settings?msg=user_updated", http.StatusSeeOther)
+}
+
+func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if selfID, ok := userIDFromContext(r.Context()); ok && selfID == id {
+		http.Redirect(w, r, "/settings?err=user_self", http.StatusSeeOther)
+		return
+	}
+	if err := s.store.DeleteUser(r.Context(), id); err != nil {
+		if errors.Is(err, store.ErrLastEnabledUser) {
+			http.Redirect(w, r, "/settings?err=user_last", http.StatusSeeOther)
+			return
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		s.serverError(w, "delete user", err)
+		return
+	}
+	http.Redirect(w, r, "/settings?msg=user_deleted", http.StatusSeeOther)
+}
+
+func userErrCode(err error) string {
+	switch {
+	case errors.Is(err, store.ErrDuplicateUsername):
+		return "user_dup"
+	case errors.Is(err, store.ErrWeakPassword):
+		return "user_weak"
+	case errors.Is(err, store.ErrInvalidUsername):
+		return "user_invalid"
+	case errors.Is(err, store.ErrLastEnabledUser):
+		return "user_last"
+	default:
+		return "user_invalid"
+	}
 }
 
 func (s *Server) createUserAgent(w http.ResponseWriter, r *http.Request) {
@@ -551,6 +661,10 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, data map[string]any) {
+	s.renderStatus(w, r, http.StatusOK, page, data)
+}
+
+func (s *Server) renderStatus(w http.ResponseWriter, r *http.Request, status int, page string, data map[string]any) {
 	tmpl, ok := s.pages[page]
 	if !ok {
 		s.serverError(w, "missing template "+page, fmt.Errorf("template not found"))
@@ -563,6 +677,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, dat
 		data["Error"] = errorMessage(r.URL.Query().Get("err"))
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
 	if err := tmpl.ExecuteTemplate(w, "layout", data); err != nil {
 		slog.Error("render template failed", "page", page, "error", err)
 	}
@@ -583,7 +698,7 @@ func parseTemplates() (map[string]*template.Template, error) {
 		"fmtFloat":   fmtFloat,
 		"statusText": statusText,
 	}
-	pages := []string{"dashboard.html", "form.html", "stats.html", "settings.html"}
+	pages := []string{"dashboard.html", "form.html", "stats.html", "settings.html", "login.html"}
 	out := make(map[string]*template.Template, len(pages))
 	for _, page := range pages {
 		t, err := template.New("").Funcs(funcs).ParseFS(webassets.FS, "templates/layout.html", "templates/"+page)
@@ -629,6 +744,12 @@ func flashMessage(code string) string {
 		return "User-Agent удалён"
 	case "ua_default":
 		return "User-Agent по умолчанию обновлён"
+	case "user_created":
+		return "Пользователь добавлен"
+	case "user_updated":
+		return "Пользователь сохранён"
+	case "user_deleted":
+		return "Пользователь удалён"
 	default:
 		return ""
 	}
@@ -655,6 +776,16 @@ func errorMessage(code string) string {
 		return "Проверьте название и строку User-Agent."
 	case "ua_last":
 		return "Нельзя удалить последний User-Agent."
+	case "user_invalid":
+		return "Проверьте логин и пароль пользователя."
+	case "user_dup":
+		return "Пользователь с таким логином уже есть."
+	case "user_weak":
+		return "Пароль слишком короткий (минимум 8 символов)."
+	case "user_last":
+		return "Нельзя удалить или выключить последнего активного пользователя."
+	case "user_self":
+		return "Нельзя удалить свою учётную запись."
 	default:
 		return ""
 	}

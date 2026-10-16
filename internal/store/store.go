@@ -567,7 +567,12 @@ func (s *Store) StreamDump(ctx context.Context, w io.Writer, includeChecks bool)
 		return err
 	}
 
-	writeRaw(`,"user_agents":[`)
+	writeRaw(`,"users":[`)
+	if err := s.streamUsers(ctx, bw, enc); err != nil {
+		return err
+	}
+
+	writeRaw(`],"user_agents":[`)
 	if err := s.streamUserAgents(ctx, bw, enc); err != nil {
 		return err
 	}
@@ -697,11 +702,26 @@ func (s *Store) ImportStream(ctx context.Context, src io.ReadSeeker) error {
 	uaIDs := make(map[int64]struct{})
 	importedUA := false
 	var maxUAID int64
-
 	if _, err := src.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("rewind dump: %w", err)
 	}
 	err = walkDumpObject(src, map[string]dumpHandler{
+		"users": func(dec *json.Decoder) error {
+			// Ключ users в дампе есть — заменяем таблицу. Старые дампы без keys — users не трогаем.
+			if _, err := tx.ExecContext(ctx, `DELETE FROM users`); err != nil {
+				return fmt.Errorf("clear users: %w", err)
+			}
+			return eachArrayElement(dec, func() error {
+				var u models.User
+				if err := dec.Decode(&u); err != nil {
+					return errInvalidDump
+				}
+				if _, err := insertUserTx(ctx, tx, u); err != nil {
+					return err
+				}
+				return nil
+			})
+		},
 		"user_agents": func(dec *json.Decoder) error {
 			importedUA = true
 			if _, err := tx.ExecContext(ctx, `DELETE FROM user_agents`); err != nil {
