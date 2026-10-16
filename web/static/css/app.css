@@ -162,6 +162,7 @@ h2 { font-size: 16px; }
 
 .name-link { font-weight: 600; color: var(--text); }
 .err-cell { color: var(--danger); max-width: 360px; word-break: break-word; }
+.ok-cell { color: var(--ok); max-width: 360px; word-break: break-word; }
 
 .actions {
     display: flex;

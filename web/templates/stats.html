@@ -72,7 +72,7 @@
                     <td>{{.ResponseMS}} мс</td>
                     <td>{{if .OK}}да{{else}}нет{{end}}</td>
                     <td>{{if .Slow}}да{{else}}нет{{end}}</td>
-                    <td class="err-cell">{{.ErrorText}}</td>
+                    <td class="{{if and .OK .ErrorText}}ok-cell{{else if .ErrorText}}err-cell{{end}}">{{.ErrorText}}</td>
                 </tr>
             {{end}}
             </tbody>

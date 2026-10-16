@@ -63,6 +63,52 @@ func TestCheckExpectedStatus(t *testing.T) {
 	if res.StatusCode == nil || *res.StatusCode != 200 {
 		t.Fatalf("expected status 200, got %+v", res.StatusCode)
 	}
+	if res.ErrorText != "127.0.0.1" && res.ErrorText != "::1" {
+		t.Fatalf("expected loopback IP in ErrorText, got %q", res.ErrorText)
+	}
+}
+
+func TestCheckOKStoresRemoteIP(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+
+	res := New().Check(context.Background(), models.Monitor{
+		URL:             ts.URL,
+		ExpectedStatus:  200,
+		TimeoutSeconds:  2,
+		SlowThresholdMS: 5000,
+	})
+	if !res.OK {
+		t.Fatalf("expected ok, got %+v", res)
+	}
+	if res.ErrorText != "127.0.0.1" && res.ErrorText != "::1" {
+		t.Fatalf("ErrorText = %q, want 127.0.0.1 or ::1", res.ErrorText)
+	}
+}
+
+func TestCheckUnexpectedStatusDoesNotStoreIP(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(ts.Close)
+
+	res := New().Check(context.Background(), models.Monitor{
+		URL:             ts.URL,
+		ExpectedStatus:  200,
+		TimeoutSeconds:  2,
+		SlowThresholdMS: 5000,
+	})
+	if res.OK {
+		t.Fatal("expected failure")
+	}
+	if !strings.Contains(res.ErrorText, "unexpected status") {
+		t.Fatalf("ErrorText = %q, want unexpected status message", res.ErrorText)
+	}
+	if res.ErrorText == "127.0.0.1" || res.ErrorText == "::1" {
+		t.Fatal("failed check must not store only IP in ErrorText")
+	}
 }
 
 func TestCheckUnexpectedStatus(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"syscall"
 	"time"
@@ -102,6 +103,16 @@ func (c *Checker) Check(ctx context.Context, mon models.Monitor) models.Check {
 	req.Header.Set("User-Agent", ua)
 	req.Header.Set("Accept", "*/*")
 
+	var remoteIP string
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			if info.Conn == nil {
+				return
+			}
+			remoteIP = peerIP(info.Conn.RemoteAddr())
+		},
+	}))
+
 	start := time.Now()
 	resp, err := c.client.Do(req)
 	if resp != nil {
@@ -123,8 +134,21 @@ func (c *Checker) Check(ctx context.Context, mon models.Monitor) models.Check {
 	result.OK = code == mon.ExpectedStatus
 	if !result.OK {
 		result.ErrorText = fmt.Sprintf("unexpected status %d, expected %d", code, mon.ExpectedStatus)
+	} else if remoteIP != "" {
+		result.ErrorText = remoteIP
 	}
 	return result
+}
+
+func peerIP(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	return host
 }
 
 func isSlow(thresholdMS, responseMS int) bool {
