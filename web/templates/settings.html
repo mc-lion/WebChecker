@@ -21,7 +21,7 @@
         {{if and .TelegramEnabled (not .TelegramSlowAlerts)}}
         <p class="muted">Алерты о долгом ответе выключены переменной <code>TELEGRAM_SLOW_ALERTS=false</code>.</p>
         {{end}}
-        <p class="muted">Команды в чате: <code>list</code>, <code>stat</code>, <code>stat id</code>, <code>help</code>. Сообщение о медленном ответе уходит после N подряд медленных проверок (поле «Алерт после N подряд проблем»).</p>
+        <p class="muted">Команды в чате: <code>list</code>, <code>stat</code>, <code>stat id</code>, <code>help</code>. Алерты о медленном ответе настраиваются у каждого URL (флаг и порог N); глобально их можно выключить через <code>TELEGRAM_SLOW_ALERTS=false</code>.</p>
         <form method="post" action="/settings/telegram-test">
             <button type="submit" class="btn btn-primary" {{if not .TelegramConfigured}}disabled{{end}}>Отправить тест</button>
         </form>

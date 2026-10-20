@@ -163,34 +163,36 @@ flowchart TB
 
 ## Алерты Telegram
 
-Алерты — это не «каждое падение», а смена устойчивого состояния. Порог устойчивости — `fail_threshold` монитора (N подряд проблем).
+Алерты — это не «каждое падение», а смена устойчивого состояния. Счётчики раздельные:
 
-Проблема для счётчика:
+- недоступность (`ok = false`): `consecutive_problems` и порог `fail_threshold`;
+- долгий успешный ответ (`ok = true`, `slow = true`): `consecutive_slow` и порог `slow_fail_threshold`, если у монитора `slow_alerts_enabled` и глобально `TELEGRAM_SLOW_ALERTS=true`.
 
-- `ok = false`, или
-- `slow = true` **и** включён `TELEGRAM_SLOW_ALERTS`.
-
-Если `TELEGRAM_SLOW_ALERTS=false`, медленный успешный ответ счётчик не увеличивает и сообщение «долгий ответ» не уходит.
+Если `TELEGRAM_SLOW_ALERTS=false` или на мониторе выключен флаг «отправлять алерты о медленном ответе», медленный успешный ответ счётчик slow не увеличивает и сообщение «долгий ответ» не уходит.
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Healthy: consecutive 0
-  Healthy --> Counting: проблема
-  Counting --> Counting: ещё проблема, счётчик меньше N
-  Counting --> Alerted: счётчик достиг N
-  Alerted --> Alerted: те же проблемы, повторных сообщений нет
-  Alerted --> Healthy: ok и не slow
-  Counting --> Healthy: ok и не slow
+  [*] --> Healthy: counters 0
+  Healthy --> CountingDown: not ok
+  Healthy --> CountingSlow: ok and slow and alerts on
+  CountingDown --> AlertedDown: consecutive_problems >= fail_threshold
+  CountingSlow --> AlertedSlow: consecutive_slow >= slow_fail_threshold
+  AlertedDown --> AlertedDown: still down, no repeat
+  AlertedSlow --> AlertedSlow: still slow, no repeat
+  AlertedDown --> Healthy: ok and not slow
+  AlertedSlow --> Healthy: ok and not slow
+  CountingDown --> Healthy: ok and not slow
+  CountingSlow --> Healthy: ok and not slow
 ```
 
-При переходе в Alerted:
+При достижении порога:
 
 1. если не `ok` и ещё не `down_alerted` → «URL недоступен»;
 2. если проверка **успешна**, но медленная, и ещё не `slow_alerted` → «Долгий ответ».
 
-Сообщение «долгий ответ» уходит только для успешных проверок. При таймауте проверка одновременно не `ok` и `slow`, и раньше в чат улетали два сообщения про один и тот же инцидент; теперь остаётся только «URL недоступен».
+Сообщение «долгий ответ» уходит только для успешных проверок. При таймауте проверка одновременно не `ok` и `slow` — уходит только «URL недоступен».
 
-При возврате в норму, если раньше был любой алерт → одно сообщение «URL восстановлен», флаги сбрасываются.
+При возврате в норму (ok и не slow / slow-алерты выкл.), если раньше был любой алерт → одно сообщение «URL восстановлен», флаги сбрасываются.
 
 Тестовая кнопка в настройках вызывает `Send`, а не `Notify`. Она проверяет доставку в чат и **не требует** `TELEGRAM_ENABLED=true`. Непрошенные алерты требуют и конфигурацию, и `TELEGRAM_ENABLED`.
 

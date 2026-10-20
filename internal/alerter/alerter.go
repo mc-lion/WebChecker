@@ -71,14 +71,19 @@ func (a *Alerter) notify(ctx context.Context, kind string, mon models.Monitor, t
 	return a.tg.Notify(ctx, text)
 }
 
-func evaluate(state models.AlertState, mon models.Monitor, check models.Check, slowAlerts bool) (models.AlertState, bool, bool, bool) {
-	slowProblem := check.Slow && slowAlerts
-	problem := !check.OK || slowProblem
+func evaluate(state models.AlertState, mon models.Monitor, check models.Check, globalSlow bool) (models.AlertState, bool, bool, bool) {
 	next := state
+	slowEnabled := globalSlow && mon.SlowAlertsEnabled
+	slowThreshold := mon.SlowFailThreshold
+	if slowThreshold < 1 {
+		slowThreshold = 3
+	}
 
-	if !problem {
+	// Успешный и не медленный (или slow-алерты выключены) — сброс / recovery.
+	if check.OK && !(check.Slow && slowEnabled) {
 		sendRecovery := state.DownAlerted || state.SlowAlerted
 		next.ConsecutiveProblems = 0
+		next.ConsecutiveSlow = 0
 		if !sendRecovery {
 			next.DownAlerted = false
 			next.SlowAlerted = false
@@ -86,15 +91,19 @@ func evaluate(state models.AlertState, mon models.Monitor, check models.Check, s
 		return next, false, false, sendRecovery
 	}
 
-	next.ConsecutiveProblems++
-	if next.ConsecutiveProblems < mon.FailThreshold {
-		return next, false, false, false
+	// Недоступность: отдельный счётчик и FailThreshold.
+	if !check.OK {
+		next.ConsecutiveProblems++
+		next.ConsecutiveSlow = 0
+		sendDown := next.ConsecutiveProblems >= mon.FailThreshold && !state.DownAlerted
+		return next, sendDown, false, false
 	}
-	sendDown := !check.OK && !state.DownAlerted
-	// При таймауте проверка одновременно !OK и Slow. Про такой инцидент нужно
-	// одно сообщение «недоступен», а не два про один и тот же таймаут.
-	sendSlow := slowProblem && check.OK && !state.SlowAlerted
-	return next, sendDown, sendSlow, false
+
+	// Успешный, но медленный, и алерты включены.
+	next.ConsecutiveSlow++
+	next.ConsecutiveProblems = 0
+	sendSlow := next.ConsecutiveSlow >= slowThreshold && !state.SlowAlerted
+	return next, false, sendSlow, false
 }
 
 func downMessage(mon models.Monitor, check models.Check) string {

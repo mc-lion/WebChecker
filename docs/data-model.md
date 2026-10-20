@@ -30,6 +30,8 @@ erDiagram
     int timeout_seconds
     int slow_threshold_ms
     int fail_threshold
+    tinyint slow_alerts_enabled
+    int slow_fail_threshold
     tinyint enabled
     datetime created_at
     datetime updated_at
@@ -49,6 +51,7 @@ erDiagram
   alert_states {
     bigint monitor_id PK
     int consecutive_problems
+    int consecutive_slow
     tinyint down_alerted
     tinyint slow_alerted
     datetime updated_at
@@ -85,7 +88,9 @@ erDiagram
 | `expected_status` | Какой HTTP-код считается успехом | 100–599, по умолчанию 200 |
 | `timeout_seconds` | Дедлайн GET | 1–120, по умолчанию 10 |
 | `slow_threshold_ms` | Порог «долгого» ответа | 1–600000, по умолчанию 3000 |
-| `fail_threshold` | Сколько подряд проблем до алерта | 1–100, по умолчанию 3 |
+| `fail_threshold` | Сколько подряд неуспешных проверок до алерта «недоступен» | 1–100, по умолчанию 3 |
+| `slow_alerts_enabled` | Отправлять алерты о медленном ответе | чекбокс, по умолчанию вкл. |
+| `slow_fail_threshold` | Сколько подряд успешных медленных проверок до алерта | 1–100, по умолчанию 3 |
 | `enabled` | Участвует ли в планировщике | чекбокс, по умолчанию вкл. |
 | `created_at` / `updated_at` | Служебные метки | DATETIME(3) |
 
@@ -125,7 +130,8 @@ erDiagram
 | Поле | Смысл |
 | --- | --- |
 | `monitor_id` | PK и FK на `monitors` |
-| `consecutive_problems` | Сколько подряд проверок были проблемой |
+| `consecutive_problems` | Сколько подряд проверок были неуспешными (`ok = 0`) |
+| `consecutive_slow` | Сколько подряд успешных медленных проверок |
 | `down_alerted` | Уже отправили «URL недоступен» |
 | `slow_alerted` | Уже отправили «долгий ответ» |
 | `updated_at` | Время последнего сохранения |
@@ -184,7 +190,7 @@ DDL в MySQL не откатывается, поэтому сбой на сер�
 | `MYSQL_*` | Подключение |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Куда писать и откуда принимать команды |
 | `TELEGRAM_ENABLED` | Слать ли алерты down/slow/recovery. Тестовая кнопка работает при заданных токене и chat id даже если флаг выключен |
-| `TELEGRAM_SLOW_ALERTS` | Считать ли медленный ответ проблемой для Telegram |
+| `TELEGRAM_SLOW_ALERTS` | Глобальный выключатель slow-алертов (вместе с флагом на мониторе) |
 | `STATS_RETENTION_DAYS` | Срок жизни `checks` |
 | `CHECKER_WORKERS` | Размер пула параллельных GET |
 | `CHECK_BLOCK_PRIVATE_HOSTS` | Запретить проверки внутренних адресов (loopback, приватные диапазоны, link-local). По умолчанию `false` |

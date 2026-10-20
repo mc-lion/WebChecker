@@ -18,7 +18,8 @@ var ErrNotFound = errors.New("not found")
 var ErrLastUserAgent = errors.New("cannot delete the last user agent")
 
 const monitorSelect = `m.id, m.name, m.url, m.interval_seconds, m.retry_interval_seconds, m.expected_status, m.timeout_seconds,
-		       m.slow_threshold_ms, m.fail_threshold, m.enabled, m.created_at, m.updated_at, m.user_agent_id,
+		       m.slow_threshold_ms, m.fail_threshold, m.slow_alerts_enabled, m.slow_fail_threshold,
+		       m.enabled, m.created_at, m.updated_at, m.user_agent_id,
 		       COALESCE(ua.value, ''), COALESCE(ua.name, '')`
 const monitorFrom = `monitors m LEFT JOIN user_agents ua ON ua.id = m.user_agent_id`
 
@@ -102,9 +103,9 @@ func (s *Store) CreateMonitor(ctx context.Context, m models.Monitor) (int64, err
 	}
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO monitors (name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
-		                      slow_threshold_ms, fail_threshold, user_agent_id, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, uaID, boolToInt(m.Enabled))
+		                      slow_threshold_ms, fail_threshold, slow_alerts_enabled, slow_fail_threshold, user_agent_id, enabled)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.SlowAlertsEnabled), m.SlowFailThreshold, uaID, boolToInt(m.Enabled))
 	if err != nil {
 		return 0, fmt.Errorf("create monitor: %w", err)
 	}
@@ -123,9 +124,9 @@ func (s *Store) UpdateMonitor(ctx context.Context, m models.Monitor) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE monitors
 		SET name = ?, url = ?, interval_seconds = ?, retry_interval_seconds = ?, expected_status = ?, timeout_seconds = ?,
-		    slow_threshold_ms = ?, fail_threshold = ?, user_agent_id = ?, enabled = ?
+		    slow_threshold_ms = ?, fail_threshold = ?, slow_alerts_enabled = ?, slow_fail_threshold = ?, user_agent_id = ?, enabled = ?
 		WHERE id = ?
-	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, uaID, boolToInt(m.Enabled), m.ID)
+	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.SlowAlertsEnabled), m.SlowFailThreshold, uaID, boolToInt(m.Enabled), m.ID)
 	if err != nil {
 		return fmt.Errorf("update monitor: %w", err)
 	}
@@ -241,7 +242,8 @@ func (s *Store) Dashboard(ctx context.Context) ([]models.DashboardRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 			m.id, m.name, m.url, m.interval_seconds, m.retry_interval_seconds, m.expected_status, m.timeout_seconds,
-			m.slow_threshold_ms, m.fail_threshold, m.enabled, m.created_at, m.updated_at,
+			m.slow_threshold_ms, m.fail_threshold, m.slow_alerts_enabled, m.slow_fail_threshold,
+			m.enabled, m.created_at, m.updated_at,
 			c.status_code, c.response_ms, c.ok, c.slow, c.error_text, c.checked_at,
 			s.uptime_24h
 		FROM monitors m
@@ -279,14 +281,17 @@ func (s *Store) Dashboard(ctx context.Context) ([]models.DashboardRow, error) {
 		var lastAt sql.NullTime
 		var uptime sql.NullFloat64
 
+		var slowAlerts int
 		err := rows.Scan(
 			&row.ID, &row.Name, &row.URL, &row.IntervalSeconds, &row.RetryIntervalSeconds, &row.ExpectedStatus, &row.TimeoutSeconds,
-			&row.SlowThresholdMS, &row.FailThreshold, &enabled, &row.CreatedAt, &row.UpdatedAt,
+			&row.SlowThresholdMS, &row.FailThreshold, &slowAlerts, &row.SlowFailThreshold,
+			&enabled, &row.CreatedAt, &row.UpdatedAt,
 			&lastStatus, &lastMS, &lastOK, &lastSlow, &lastErr, &lastAt, &uptime,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan dashboard: %w", err)
 		}
+		row.SlowAlertsEnabled = slowAlerts == 1
 		row.Enabled = enabled == 1
 		if lastStatus.Valid {
 			code := int(lastStatus.Int64)
@@ -495,8 +500,8 @@ func (s *Store) GetOrCreateAlertState(ctx context.Context, monitorID int64) (mod
 		return models.AlertState{}, err
 	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO alert_states (monitor_id, consecutive_problems, down_alerted, slow_alerted)
-		VALUES (?, 0, 0, 0)
+		INSERT INTO alert_states (monitor_id, consecutive_problems, consecutive_slow, down_alerted, slow_alerted)
+		VALUES (?, 0, 0, 0, 0)
 	`, monitorID)
 	if err != nil {
 		if state, getErr := s.getAlertState(ctx, monitorID); getErr == nil {
@@ -509,13 +514,14 @@ func (s *Store) GetOrCreateAlertState(ctx context.Context, monitorID int64) (mod
 
 func (s *Store) SaveAlertState(ctx context.Context, state models.AlertState) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO alert_states (monitor_id, consecutive_problems, down_alerted, slow_alerted)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO alert_states (monitor_id, consecutive_problems, consecutive_slow, down_alerted, slow_alerted)
+		VALUES (?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			consecutive_problems = VALUES(consecutive_problems),
+			consecutive_slow = VALUES(consecutive_slow),
 			down_alerted = VALUES(down_alerted),
 			slow_alerted = VALUES(slow_alerted)
-	`, state.MonitorID, state.ConsecutiveProblems, boolToInt(state.DownAlerted), boolToInt(state.SlowAlerted))
+	`, state.MonitorID, state.ConsecutiveProblems, state.ConsecutiveSlow, boolToInt(state.DownAlerted), boolToInt(state.SlowAlerted))
 	if err != nil {
 		return fmt.Errorf("save alert state: %w", err)
 	}
@@ -1068,7 +1074,7 @@ func (s *Store) listAllChecks(ctx context.Context) ([]models.Check, error) {
 
 func (s *Store) listAlertStates(ctx context.Context) ([]models.AlertState, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT monitor_id, consecutive_problems, down_alerted, slow_alerted, updated_at
+		SELECT monitor_id, consecutive_problems, consecutive_slow, down_alerted, slow_alerted, updated_at
 		FROM alert_states
 		ORDER BY monitor_id
 	`)
@@ -1081,7 +1087,7 @@ func (s *Store) listAlertStates(ctx context.Context) ([]models.AlertState, error
 	for rows.Next() {
 		var state models.AlertState
 		var down, slow int
-		if err := rows.Scan(&state.MonitorID, &state.ConsecutiveProblems, &down, &slow, &state.UpdatedAt); err != nil {
+		if err := rows.Scan(&state.MonitorID, &state.ConsecutiveProblems, &state.ConsecutiveSlow, &down, &slow, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		state.DownAlerted = down == 1
@@ -1113,6 +1119,11 @@ func insertMonitorTx(ctx context.Context, tx *sql.Tx, m models.Monitor) (int64, 
 	if m.FailThreshold < 1 {
 		m.FailThreshold = 3
 	}
+	if m.SlowFailThreshold < 1 {
+		// Старый дамп без полей slow_*: включаем алерты и ставим порог по умолчанию.
+		m.SlowFailThreshold = 3
+		m.SlowAlertsEnabled = true
+	}
 	if m.UserAgentID == 0 {
 		var def sql.NullInt64
 		if err := tx.QueryRowContext(ctx, `SELECT id FROM user_agents WHERE is_default = 1 ORDER BY id LIMIT 1`).Scan(&def); err == nil && def.Valid {
@@ -1130,9 +1141,10 @@ func insertMonitorTx(ctx context.Context, tx *sql.Tx, m models.Monitor) (int64, 
 	if m.ID > 0 {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO monitors (id, name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
-			                      slow_threshold_ms, fail_threshold, user_agent_id, enabled, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, m.ID, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, nullIfZero(m.UserAgentID), boolToInt(m.Enabled), created, updated)
+			                      slow_threshold_ms, fail_threshold, slow_alerts_enabled, slow_fail_threshold,
+			                      user_agent_id, enabled, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, m.ID, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.SlowAlertsEnabled), m.SlowFailThreshold, nullIfZero(m.UserAgentID), boolToInt(m.Enabled), created, updated)
 		if err != nil {
 			return 0, fmt.Errorf("import monitor %d: %w", m.ID, err)
 		}
@@ -1141,9 +1153,10 @@ func insertMonitorTx(ctx context.Context, tx *sql.Tx, m models.Monitor) (int64, 
 
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO monitors (name, url, interval_seconds, retry_interval_seconds, expected_status, timeout_seconds,
-		                      slow_threshold_ms, fail_threshold, user_agent_id, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, nullIfZero(m.UserAgentID), boolToInt(m.Enabled), created, updated)
+		                      slow_threshold_ms, fail_threshold, slow_alerts_enabled, slow_fail_threshold,
+		                      user_agent_id, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, m.Name, m.URL, m.IntervalSeconds, m.RetryIntervalSeconds, m.ExpectedStatus, m.TimeoutSeconds, m.SlowThresholdMS, m.FailThreshold, boolToInt(m.SlowAlertsEnabled), m.SlowFailThreshold, nullIfZero(m.UserAgentID), boolToInt(m.Enabled), created, updated)
 	if err != nil {
 		return 0, fmt.Errorf("import monitor: %w", err)
 	}
@@ -1181,9 +1194,9 @@ func insertCheckTx(ctx context.Context, tx *sql.Tx, c models.Check) error {
 
 func insertAlertStateTx(ctx context.Context, tx *sql.Tx, state models.AlertState) error {
 	_, err := tx.ExecContext(ctx, `
-		INSERT INTO alert_states (monitor_id, consecutive_problems, down_alerted, slow_alerted)
-		VALUES (?, ?, ?, ?)
-	`, state.MonitorID, state.ConsecutiveProblems, boolToInt(state.DownAlerted), boolToInt(state.SlowAlerted))
+		INSERT INTO alert_states (monitor_id, consecutive_problems, consecutive_slow, down_alerted, slow_alerted)
+		VALUES (?, ?, ?, ?, ?)
+	`, state.MonitorID, state.ConsecutiveProblems, state.ConsecutiveSlow, boolToInt(state.DownAlerted), boolToInt(state.SlowAlerted))
 	if err != nil {
 		return fmt.Errorf("import alert state %d: %w", state.MonitorID, err)
 	}
@@ -1210,10 +1223,10 @@ func (s *Store) getAlertState(ctx context.Context, monitorID int64) (models.Aler
 	var state models.AlertState
 	var down, slow int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT monitor_id, consecutive_problems, down_alerted, slow_alerted, updated_at
+		SELECT monitor_id, consecutive_problems, consecutive_slow, down_alerted, slow_alerted, updated_at
 		FROM alert_states
 		WHERE monitor_id = ?
-	`, monitorID).Scan(&state.MonitorID, &state.ConsecutiveProblems, &down, &slow, &state.UpdatedAt)
+	`, monitorID).Scan(&state.MonitorID, &state.ConsecutiveProblems, &state.ConsecutiveSlow, &down, &slow, &state.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return models.AlertState{}, ErrNotFound
 	}
@@ -1231,15 +1244,17 @@ type scanner interface {
 
 func scanMonitor(sc scanner) (models.Monitor, error) {
 	var m models.Monitor
-	var enabled int
+	var enabled, slowAlerts int
 	var uaID sql.NullInt64
 	err := sc.Scan(
 		&m.ID, &m.Name, &m.URL, &m.IntervalSeconds, &m.RetryIntervalSeconds, &m.ExpectedStatus, &m.TimeoutSeconds,
-		&m.SlowThresholdMS, &m.FailThreshold, &enabled, &m.CreatedAt, &m.UpdatedAt, &uaID, &m.UserAgent, &m.UserAgentName,
+		&m.SlowThresholdMS, &m.FailThreshold, &slowAlerts, &m.SlowFailThreshold,
+		&enabled, &m.CreatedAt, &m.UpdatedAt, &uaID, &m.UserAgent, &m.UserAgentName,
 	)
 	if err != nil {
 		return models.Monitor{}, err
 	}
+	m.SlowAlertsEnabled = slowAlerts == 1
 	m.Enabled = enabled == 1
 	if uaID.Valid {
 		m.UserAgentID = uaID.Int64

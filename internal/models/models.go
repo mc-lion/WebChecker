@@ -12,6 +12,8 @@ type Monitor struct {
 	TimeoutSeconds       int       `json:"timeout_seconds"`
 	SlowThresholdMS      int       `json:"slow_threshold_ms"`
 	FailThreshold        int       `json:"fail_threshold"`
+	SlowAlertsEnabled    bool      `json:"slow_alerts_enabled"`
+	SlowFailThreshold    int       `json:"slow_fail_threshold"`
 	UserAgentID          int64     `json:"user_agent_id,omitempty"`
 	UserAgent            string    `json:"-"`
 	UserAgentName        string    `json:"-"`
@@ -52,6 +54,7 @@ type Check struct {
 type AlertState struct {
 	MonitorID           int64     `json:"monitor_id"`
 	ConsecutiveProblems int       `json:"consecutive_problems"`
+	ConsecutiveSlow     int       `json:"consecutive_slow"`
 	DownAlerted         bool      `json:"down_alerted"`
 	SlowAlerted         bool      `json:"slow_alerted"`
 	UpdatedAt           time.Time `json:"updated_at,omitempty"`

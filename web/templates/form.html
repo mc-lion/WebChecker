@@ -48,8 +48,16 @@
             <input type="number" name="slow_threshold_ms" value="{{.Monitor.SlowThresholdMS}}" min="1" max="600000" required>
         </label>
         <label>
-            Алерт после N подряд проблем
+            Алерт о недоступности после N подряд проблем
             <input type="number" name="fail_threshold" value="{{.Monitor.FailThreshold}}" min="1" max="100" required>
+        </label>
+        <label>
+            Алерт о медленном ответе после N подряд
+            <input type="number" name="slow_fail_threshold" value="{{.Monitor.SlowFailThreshold}}" min="1" max="100" required>
+        </label>
+        <label class="checkbox">
+            <input type="checkbox" name="slow_alerts_enabled" value="1" {{if .Monitor.SlowAlertsEnabled}}checked{{end}}>
+            отправлять алерты о медленном ответе
         </label>
         <label class="checkbox">
             <input type="checkbox" name="enabled" value="1" {{if .Monitor.Enabled}}checked{{end}}>

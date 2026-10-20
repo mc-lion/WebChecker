@@ -31,6 +31,8 @@ func defaultMonitor() models.Monitor {
 		TimeoutSeconds:       10,
 		SlowThresholdMS:      3000,
 		FailThreshold:        3,
+		SlowAlertsEnabled:    true,
+		SlowFailThreshold:    3,
 		Enabled:              true,
 	}
 }
@@ -63,6 +65,11 @@ func monitorFromForm(values url.Values, existing models.Monitor) (models.Monitor
 		return m, err
 	}
 	m.FailThreshold, err = parseIntField(values.Get("fail_threshold"), "порог подряд ошибок")
+	if err != nil {
+		return m, err
+	}
+	m.SlowAlertsEnabled = values.Get("slow_alerts_enabled") == "1"
+	m.SlowFailThreshold, err = parseIntField(values.Get("slow_fail_threshold"), "порог подряд медленных ответов")
 	if err != nil {
 		return m, err
 	}
@@ -108,6 +115,9 @@ func monitorFromForm(values url.Values, existing models.Monitor) (models.Monitor
 	}
 	if m.FailThreshold < minFailThreshold || m.FailThreshold > maxFailThreshold {
 		return m, fmt.Errorf("порог подряд ошибок должен быть от %d до %d", minFailThreshold, maxFailThreshold)
+	}
+	if m.SlowFailThreshold < minFailThreshold || m.SlowFailThreshold > maxFailThreshold {
+		return m, fmt.Errorf("порог подряд медленных ответов должен быть от %d до %d", minFailThreshold, maxFailThreshold)
 	}
 	return m, nil
 }
