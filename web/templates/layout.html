@@ -1,11 +1,13 @@
 {{define "layout"}}
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" class="g-root g-root_theme_light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     {{if .Refresh}}<meta http-equiv="refresh" content="30">{{end}}
     <title>{{if .Title}}{{.Title}} — {{end}}webChecker</title>
+    <link rel="stylesheet" href="/static/vendor/gravity/fonts.css">
+    <link rel="stylesheet" href="/static/vendor/gravity/styles.css">
     <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body class="{{if .Public}}is-public{{end}}">

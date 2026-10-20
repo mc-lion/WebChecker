@@ -7,6 +7,7 @@
 - GET-проверки URL с заданным интервалом, отдельным интервалом повтора после ошибки, ожидаемым HTTP-статусом, таймаутом и порогом долгого ответа
 - При старте проверки разнесены по времени (`id % interval` и последняя запись в БД), чтобы не бить все URL сразу
 - Дашборд, CRUD мониторов, статистика за 24 часа и 7 дней, график времени ответа
+- Web UI на Go-шаблонах, визуально на CSS-токенах [Gravity UI](https://gravity-ui.com/) (без React)
 - JWT-авторизация (логин-форма, cookie и `Authorization: Bearer`), пользователи в БД и защита изменяющих запросов от CSRF
 - Telegram: одно сообщение после N подряд проблем и отдельное — когда URL снова в норме
 - Команды бота в чате: `list`, `stat`, `stat <id>`
@@ -116,7 +117,9 @@ go run ./cmd/webchecker
 cmd/webchecker/     точка входа
 internal/           конфиг, БД, проверки, планировщик, Telegram, HTTP
 web/templates/      HTML
-web/static/css/     CSS
+web/static/css/     стили приложения (токены Gravity)
+web/static/vendor/gravity/  fonts.css + styles.css из @gravity-ui/uikit
 web/static/js/      JS (включая Chart.js)
 migrations/         SQL-миграции
 ```
+

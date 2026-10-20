@@ -53,7 +53,8 @@
       const labels = points.map((p) => p.t);
       const values = points.map((p) => p.ms);
       const okFlags = points.map((p) => p.ok !== false);
-      const pointColors = okFlags.map((ok) => (ok ? "#2563eb" : "#dc2626"));
+      // Gravity-like brand / danger (approx --g-color-base-brand / danger).
+      const pointColors = okFlags.map((ok) => (ok ? "#3474e0" : "#e35c4c"));
       const pointRadius = okFlags.map((ok) => {
         if (!ok) {
           return 3;
@@ -70,8 +71,8 @@
               {
                 label: "Время ответа, мс",
                 data: values,
-                borderColor: "#2563eb",
-                backgroundColor: "rgba(37, 99, 235, 0.12)",
+                borderColor: "#3474e0",
+                backgroundColor: "rgba(52, 116, 224, 0.12)",
                 fill: true,
                 tension: 0.25,
                 spanGaps: true,
